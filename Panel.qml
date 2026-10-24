@@ -453,7 +453,7 @@ Panel {
                 elide: Text.ElideRight
                 text: root.engineInfo(row.modelData.engine).title + " " + row.modelData.version
                   + "  ·  :" + row.modelData.port + "  ·  "
-                  + (row.armed ? "Click 󰆴 again to delete with its data"
+                  + (row.armed ? "Click 󰆴 again to delete"
                     : root.copiedName === row.modelData.name ? "URL copied" : root.statusText(row.modelData))
                 color: row.armed ? Color.urgent : root.dim
                 font.family: root.fontFamily
@@ -477,7 +477,7 @@ Panel {
 
               IconAction {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "󰆍"
+                text: ""
                 tip: "Open CLI client"
                 onActivated: root.launch(["client", row.modelData.name])
               }

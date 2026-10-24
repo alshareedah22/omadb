@@ -8,7 +8,7 @@ A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
   Valkey, MongoDB), a version, a name and a port. A free port is suggested
   automatically, so several versions of the same engine run side by side.
 - **Start / stop** it with the switch
-- **Copy** its connection URL (󰆏), open its **CLI client** in a terminal (󰆍),
+- **Copy** its connection URL (󰆏), open its **CLI client** in a terminal (),
   follow its **logs** (󰦪)
 - Make it **start with the system** (󰐥)
 - **Delete** it and its data (󰆴, click twice)
