@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "blackcode.omadb",
+  "name": "OmaDB",
+  "version": "1.0.0",
+  "author": "BlackCode",
+  "license": "MIT",
+  "description": "OmaDB: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, started and stopped with a click",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaDB",
+    "description": "Local database servers; click to create, start, stop, connect or remove them",
+    "category": "Development",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "label": "Icon and count"
+    },
+    "schema": [
+      {
+        "key": "label",
+        "type": "enum",
+        "label": "Bar label",
+        "options": [
+          "Icon and count",
+          "Icon only"
+        ],
+        "defaultValue": "Icon and count",
+        "description": "Show how many servers are running next to the icon."
+      }
+    ]
+  }
+}

@@ -1,0 +1,251 @@
+#!/bin/bash
+
+# Backend for the OmaDB bar widget (blackcode.omadb).
+#
+# A DBngin-style manager for local database servers. Each service is a Docker
+# container labelled omadb.managed=1, published on 127.0.0.1 only, with its
+# data in a named volume (omadb-<name>) so it survives stop, start and image
+# updates. Containers this plugin did not create are never touched.
+#
+#   dbctl state                     JSON: docker status, engines, services
+#   dbctl create <engine> <version> <name> <port> <autostart:on|off>
+#   dbctl start|stop|restart <name>
+#   dbctl remove <name> [--keep-data]
+#   dbctl autostart <name> on|off
+#   dbctl url <name>                print the connection URL
+#   dbctl copy <name>               copy the connection URL to the clipboard
+#   dbctl client <name>             open the engine's CLI client in a terminal
+#   dbctl logs <name>               follow the server log in a terminal
+#   dbctl port <engine>             next free port for an engine
+
+set -euo pipefail
+
+PREFIX="omadb-"
+LABEL="omadb.managed=1"
+
+fail() {
+  echo "dbctl: $*" >&2
+  exit 1
+}
+
+# engine|title|default port|versions (first is the default)
+ENGINES=(
+  "postgresql|PostgreSQL|5432|18 17 16 15 14"
+  "mysql|MySQL|3306|8.4 8.0 9"
+  "mariadb|MariaDB|3306|11.8 11.4 10.11"
+  "redis|Redis|6379|8 7"
+  "valkey|Valkey|6379|8"
+  "mongodb|MongoDB|27017|8 7"
+)
+
+engine_field() {
+  local e
+  for e in "${ENGINES[@]}"; do
+    IFS='|' read -r id title port versions <<<"$e"
+    if [[ $id == "$1" ]]; then
+      case $2 in
+      title) echo "$title" ;;
+      port) echo "$port" ;;
+      versions) echo "$versions" ;;
+      esac
+      return 0
+    fi
+  done
+  fail "unknown engine: $1"
+}
+
+container() { echo "$PREFIX$1"; }
+
+require_managed() {
+  local label
+  label=$(docker inspect -f '{{index .Config.Labels "omadb.managed"}}' "$(container "$1")" 2>/dev/null) ||
+    fail "no service named $1"
+  [[ $label == 1 ]] || fail "$1 is not managed by OmaDB"
+}
+
+label_of() {
+  docker inspect -f "{{index .Config.Labels \"omadb.$2\"}}" "$(container "$1")"
+}
+
+port_taken() {
+  local p=$1
+  ss -ltnH "sport = :$p" 2>/dev/null | grep -q . && return 0
+  # Stopped services still own their port.
+  docker ps -a --filter "label=$LABEL" --filter "label=omadb.port=$p" -q | grep -q . && return 0
+  return 1
+}
+
+next_port() {
+  local p
+  p=$(engine_field "$1" port)
+  while port_taken "$p"; do p=$((p + 1)); done
+  echo "$p"
+}
+
+docker_status() {
+  command -v docker >/dev/null || { echo missing; return; }
+  docker info >/dev/null 2>&1 || { echo stopped; return; }
+  echo running
+}
+
+cmd_state() {
+  local status engines services="[]"
+  status=$(docker_status)
+
+  engines=$(for e in "${ENGINES[@]}"; do
+    IFS='|' read -r id title port versions <<<"$e"
+    jq -nc --arg id "$id" --arg title "$title" --argjson port "$port" --arg versions "$versions" \
+      '{id: $id, title: $title, port: $port, versions: ($versions | split(" "))}'
+  done | jq -sc .)
+
+  if [[ $status == running ]]; then
+    local ids
+    ids=$(docker ps -aq --filter "label=$LABEL")
+    if [[ -n $ids ]]; then
+      # shellcheck disable=SC2086
+      services=$(docker inspect $ids | jq -c '[.[] | {
+        name: .Config.Labels["omadb.name"],
+        engine: .Config.Labels["omadb.engine"],
+        version: .Config.Labels["omadb.version"],
+        port: (.Config.Labels["omadb.port"] | tonumber),
+        created: .Created,
+        state: .State.Status,
+        health: (.State.Health.Status // ""),
+        running: .State.Running,
+        autostart: (.HostConfig.RestartPolicy.Name == "unless-stopped" or .HostConfig.RestartPolicy.Name == "always")
+      }] | sort_by(.created)')
+    fi
+  fi
+
+  jq -nc --arg docker "$status" --argjson engines "$engines" --argjson services "$services" \
+    '{docker: $docker, engines: $engines, services: $services}'
+}
+
+cmd_create() {
+  local engine=${1:-} version=${2:-} name=${3:-} port=${4:-} autostart=${5:-off}
+  [[ -n $engine && -n $version && -n $name ]] || fail "usage: create <engine> <version> <name> <port> <on|off>"
+  [[ $name =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "name: lowercase letters, digits and dashes"
+  [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
+  [[ -z $port ]] && port=$(next_port "$engine")
+  [[ $port =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || fail "port must be 1024–65535"
+  docker inspect "$(container "$name")" >/dev/null 2>&1 && fail "a service named $name already exists"
+  port_taken "$port" && fail "port $port is already in use"
+
+  local image inner data env=()
+  case $engine in
+  postgresql)
+    image="postgres:$version"
+    inner=5432
+    # Postgres 18 images moved PGDATA under /var/lib/postgresql/<major>.
+    if ((${version%%.*} >= 18)); then data=/var/lib/postgresql; else data=/var/lib/postgresql/data; fi
+    env=(-e POSTGRES_HOST_AUTH_METHOD=trust)
+    ;;
+  mysql)
+    image="mysql:$version"
+    inner=3306
+    data=/var/lib/mysql
+    env=(-e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_ROOT_HOST=%)
+    ;;
+  mariadb)
+    image="mariadb:$version"
+    inner=3306
+    data=/var/lib/mysql
+    env=(-e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1)
+    ;;
+  redis)
+    image="redis:$version"
+    inner=6379
+    data=/data
+    ;;
+  valkey)
+    image="valkey/valkey:$version"
+    inner=6379
+    data=/data
+    ;;
+  mongodb)
+    image="mongo:$version"
+    inner=27017
+    data=/data/db
+    ;;
+  esac
+
+  local restart=no
+  [[ $autostart == on ]] && restart=unless-stopped
+
+  docker run -d --quiet \
+    --name "$(container "$name")" \
+    --label "$LABEL" \
+    --label "omadb.name=$name" \
+    --label "omadb.engine=$engine" \
+    --label "omadb.version=$version" \
+    --label "omadb.port=$port" \
+    --restart "$restart" \
+    -p "127.0.0.1:$port:$inner" \
+    -v "$(container "$name"):$data" \
+    "${env[@]}" \
+    "$image" >/dev/null
+}
+
+cmd_remove() {
+  local name=${1:-} keep=${2:-}
+  require_managed "$name"
+  docker rm -f "$(container "$name")" >/dev/null
+  [[ $keep == --keep-data ]] || docker volume rm "$(container "$name")" >/dev/null 2>&1 || true
+}
+
+cmd_autostart() {
+  require_managed "$1"
+  local policy=no
+  [[ ${2:-} == on ]] && policy=unless-stopped
+  docker update --restart "$policy" "$(container "$1")" >/dev/null
+}
+
+cmd_url() {
+  require_managed "$1"
+  local engine port
+  engine=$(label_of "$1" engine)
+  port=$(label_of "$1" port)
+  case $engine in
+  postgresql) echo "postgresql://postgres@127.0.0.1:$port/postgres" ;;
+  mysql | mariadb) echo "mysql://root@127.0.0.1:$port" ;;
+  redis | valkey) echo "redis://127.0.0.1:$port" ;;
+  mongodb) echo "mongodb://127.0.0.1:$port" ;;
+  esac
+}
+
+cmd_client() {
+  require_managed "$1"
+  local engine c client
+  engine=$(label_of "$1" engine)
+  c=$(container "$1")
+  case $engine in
+  postgresql) client="psql -U postgres" ;;
+  mysql) client="mysql -uroot" ;;
+  mariadb) client="mariadb -uroot" ;;
+  redis) client="redis-cli" ;;
+  valkey) client="valkey-cli" ;;
+  mongodb) client="mongosh --quiet" ;;
+  esac
+  [[ $(docker inspect -f '{{.State.Running}}' "$c") == true ]] || docker start "$c" >/dev/null
+  omarchy launch tui --app-id="omadb-$1" bash -c "docker exec -it $c $client"
+}
+
+case "${1:-}" in
+state) cmd_state ;;
+create) shift; cmd_create "$@" ;;
+start | stop | restart)
+  require_managed "${2:-}"
+  docker "$1" "$(container "$2")" >/dev/null
+  ;;
+remove) shift; cmd_remove "$@" ;;
+autostart) shift; cmd_autostart "$@" ;;
+url) cmd_url "${2:-}" ;;
+copy) cmd_url "${2:-}" | tr -d '\n' | wl-copy ;;
+client) cmd_client "${2:-}" ;;
+logs)
+  require_managed "${2:-}"
+  omarchy launch tui --app-id="omadb-logs" docker logs -f --tail 200 "$(container "$2")"
+  ;;
+port) next_port "${2:-}" ;;
+*) sed -n '6,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac
