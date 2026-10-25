@@ -12,7 +12,7 @@ set -uo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 DBCTL="$here/dbctl"
-ENGINES_DIR="${OMADB_HOME:-$HOME/.local/share/omadb}/engines"
+ENGINES_DIR="${OMADBNGIN_HOME:-$HOME/.local/share/omadbngin}/engines"
 PASS='p@ss#9!'
 MODES=${1:-all}
 shift || true
@@ -45,7 +45,7 @@ cleanup() {
   for n in $("$DBCTL" state 2>/dev/null | jq -r '.services[].name | select(startswith("zt-"))'); do
     "$DBCTL" remove "$n" >/dev/null 2>&1
   done
-  rm -rf "$SHIM" "${OMADB_HOME:-$HOME/.local/share/omadb}"/servers/zt-*.removed-*
+  rm -rf "$SHIM" "${OMADBNGIN_HOME:-$HOME/.local/share/omadbngin}"/servers/zt-*.removed-*
 }
 trap cleanup EXIT
 
@@ -148,11 +148,11 @@ check "every pinned URL is reachable" bash -c "jq -r '.. | .urls? // empty | .[0
 tamper=$(mktemp -d)
 cp "$DBCTL" "$tamper/dbctl"
 jq '.engines.valkey["8"].sha256 = ("0" * 64)' "$here/engines.lock" >"$tamper/engines.lock"
-# An empty OMADB_HOME, so the check runs even when valkey 8 is installed for real.
+# An empty OMADBNGIN_HOME, so the check runs even when valkey 8 is installed for real.
 export_home="$tamper/home"
-refute "a checksum mismatch refuses the install" env OMADB_HOME="$export_home" "$tamper/dbctl" install valkey 8
+refute "a checksum mismatch refuses the install" env OMADBNGIN_HOME="$export_home" "$tamper/dbctl" install valkey 8
 check "and leaves nothing installed" bash -c "! ls -d '$export_home'/engines/valkey/* 2>/dev/null"
-check "the error says why" bash -c "OMADB_HOME='$export_home' '$tamper/dbctl' install valkey 8 2>&1 | grep -q 'checksum mismatch'"
+check "the error says why" bash -c "OMADBNGIN_HOME='$export_home' '$tamper/dbctl' install valkey 8 2>&1 | grep -q 'checksum mismatch'"
 rm -rf "$tamper"
 
 # ---- Per engine, per mode ------------------------------------------------------
@@ -161,8 +161,8 @@ run_mode() {
   local mode=$1 engine=$2 version=${LINE[$2]} n="zt-$2-$1" user=app
   echo
   echo "$engine ($mode)"
-  if ! "$DBCTL" create "$engine" "$version" "$n" "" off "$mode" "$user" "$PASS" 2>/tmp/omadb-test-err; then
-    bad "$engine $mode: create ($(tail -1 /tmp/omadb-test-err))"
+  if ! "$DBCTL" create "$engine" "$version" "$n" "" off "$mode" "$user" "$PASS" 2>/tmp/omadbngin-test-err; then
+    bad "$engine $mode: create ($(tail -1 /tmp/omadbngin-test-err))"
     return
   fi
   ok "create with user $user and a password"
@@ -209,18 +209,18 @@ run_mode() {
   check "remove" "$DBCTL" remove "$n"
   refute "gone from state" bash -c "'$DBCTL' state | jq -e --arg n $n '.services[] | select(.name == \$n)'"
   if [[ $mode == native ]]; then
-    refute "unit file removed" test -e "$HOME/.config/systemd/user/omadb-$n.service"
-    refute "data removed" test -e "${OMADB_HOME:-$HOME/.local/share/omadb}/servers/$n"
+    refute "unit file removed" test -e "$HOME/.config/systemd/user/omadbngin-$n.service"
+    refute "data removed" test -e "${OMADBNGIN_HOME:-$HOME/.local/share/omadbngin}/servers/$n"
   else
-    refute "container removed" docker inspect "omadb-$n"
-    refute "volume removed" docker volume inspect "omadb-$n"
+    refute "container removed" docker inspect "omadbngin-$n"
+    refute "volume removed" docker volume inspect "omadbngin-$n"
   fi
 }
 
 run_defaults() {
   local mode=$1 engine=$2 n="zt-$2-$1-d"
-  if ! "$DBCTL" create "$engine" "${LINE[$engine]}" "$n" "" off "$mode" 2>/tmp/omadb-test-err; then
-    bad "$engine $mode: create with defaults ($(tail -1 /tmp/omadb-test-err))"
+  if ! "$DBCTL" create "$engine" "${LINE[$engine]}" "$n" "" off "$mode" 2>/tmp/omadbngin-test-err; then
+    bad "$engine $mode: create with defaults ($(tail -1 /tmp/omadbngin-test-err))"
     return
   fi
   local user
@@ -228,17 +228,17 @@ run_defaults() {
   check "default user ($user, no password) connects" eventually connect "$engine" "$(field "$n" port)" "$user" ""
   check "--keep-data keeps the data" "$DBCTL" remove "$n" --keep-data
   if [[ $mode == native ]]; then
-    check "kept data directory exists" bash -c "ls -d '${OMADB_HOME:-$HOME/.local/share/omadb}'/servers/$n.removed-* >/dev/null"
+    check "kept data directory exists" bash -c "ls -d '${OMADBNGIN_HOME:-$HOME/.local/share/omadbngin}'/servers/$n.removed-* >/dev/null"
   else
-    check "kept volume exists" docker volume inspect "omadb-$n"
-    docker volume rm "omadb-$n" >/dev/null 2>&1
+    check "kept volume exists" docker volume inspect "omadbngin-$n"
+    docker volume rm "omadbngin-$n" >/dev/null 2>&1
   fi
 }
 
 echo
-echo "Every native engine line installs (OMADB_TEST_ALL_LINES=1)"
-# Opt-in: downloads every pinned build (several GB). OMADB_TEST_ALL_LINES=1 tests/test-dbctl.sh
-if [[ $MODES != docker && ${OMADB_TEST_ALL_LINES:-0} == 1 ]]; then
+echo "Every native engine line installs (OMADBNGIN_TEST_ALL_LINES=1)"
+# Opt-in: downloads every pinned build (several GB). OMADBNGIN_TEST_ALL_LINES=1 tests/test-dbctl.sh
+if [[ $MODES != docker && ${OMADBNGIN_TEST_ALL_LINES:-0} == 1 ]]; then
   for e in postgresql mysql mariadb redis valkey mongodb; do
     for l in $(sed -n '/^ENGINES=(/,/^)/p' "$DBCTL" | grep "\"$e|" | cut -d'|' -f4 | tr -d '"'); do
       check "$e $l" "$DBCTL" install "$e" "$l"

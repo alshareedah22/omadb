@@ -1,6 +1,6 @@
-# OmaDB: local database servers for Omarchy
+# OmaDBngin: local database servers for Omarchy
 
-![OmaDB panel open from the bar](preview.png)
+![OmaDBngin panel open from the bar](preview.png)
 
 A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 
@@ -22,12 +22,12 @@ The bar shows how many servers are running; hover for the list.
 packages.
 
 - The first server of a version downloads the official build once, into
-  `~/.local/share/omadb/engines/<engine>/<version>/` (versions marked 󰇚 in the
+  `~/.local/share/omadbngin/engines/<engine>/<version>/` (versions marked 󰇚 in the
   panel are not downloaded yet). Later servers of that version reuse it.
-- Each server gets its own data directory in `~/.local/share/omadb/servers/<name>/`
-  and runs as the systemd user service `omadb-<name>.service`.
+- Each server gets its own data directory in `~/.local/share/omadbngin/servers/<name>/`
+  and runs as the systemd user service `omadbngin-<name>.service`.
   *Start with system* enables that service (it starts when you log in), and
-  logs come from `journalctl --user -u omadb-<name>`.
+  logs come from `journalctl --user -u omadbngin-<name>`.
 
 | Engine     | Native build                                       |
 |------------|----------------------------------------------------|
@@ -42,17 +42,17 @@ packages.
 exact version, download URL and SHA-256, taken from what each upstream publishes
 (GitHub release digests, MariaDB's API, MongoDB's `full.json`, `redis-hashes`,
 Valkey's `.sha256` files; MySQL publishes no SHA-256, so those are hashed when the
-lock is made). OmaDB never downloads anything that isn't in the lock, and nothing is
+lock is made). OmaDBngin never downloads anything that isn't in the lock, and nothing is
 unpacked, built or run unless its checksum matches; a mismatch stops the install and
 leaves nothing behind. New versions arrive with plugin updates; maintainers
 regenerate the lock with `tools/update-engines-lock` and review the diff.
 
-**Docker container** runs the official image as a container named `omadb-<name>`,
-labelled `omadb.managed=1`, with its data in the volume `omadb-<name>`.
+**Docker container** runs the official image as a container named `omadbngin-<name>`,
+labelled `omadbngin.managed=1`, with its data in the volume `omadbngin-<name>`.
 *Start with system* sets its restart policy to `unless-stopped`.
 
 Either way, servers listen on `127.0.0.1` only, stop and start keep the data,
-and only Delete removes it. Servers OmaDB did not create are never touched.
+and only Delete removes it. Servers OmaDBngin did not create are never touched.
 
 ## Username and password
 
@@ -79,20 +79,31 @@ Servers listen on `127.0.0.1` only.
 - For Docker mode only: Docker, running, with your user in the `docker` group
   (`omarchy install docker`)
 
+## Coming from OmaDB
+
+This plugin used to be called OmaDB (`blackcode.omadb`). Install OmaDBngin, remove the old plugin
+(`omarchy plugin remove blackcode.omadb`) and open the panel: the first run moves everything over once.
+
+- Native servers: `~/.local/share/omadb` becomes `~/.local/share/omadbngin` (engines and data), and each
+  `omadb-<name>.service` is replaced by `omadbngin-<name>.service`, keeping autostart and whether it was running.
+- Docker servers: each `omadb-<name>` container is recreated as `omadbngin-<name>` from the same image, with its
+  data copied into a new `omadbngin-<name>` volume. The old volume is kept until you remove it
+  (`docker volume rm omadb-<name>`); dbctl prints the command.
+
 ## Install
 
 From git:
 
 ```bash
-omarchy plugin add https://github.com/alshareedah22/omadb.git --enable
+omarchy plugin add https://github.com/alshareedah22/omadbngin.git --enable
 ```
 
 Or from a local copy:
 
 ```bash
-mkdir -p ~/.config/omarchy/plugins/blackcode.omadb
-cp manifest.json Panel.qml dbctl LICENSE ~/.config/omarchy/plugins/blackcode.omadb/
-omarchy plugin enable blackcode.omadb --section right
+mkdir -p ~/.config/omarchy/plugins/blackcode.omadbngin
+cp manifest.json Panel.qml dbctl engines.lock icon.svg LICENSE ~/.config/omarchy/plugins/blackcode.omadbngin/
+omarchy plugin enable blackcode.omadbngin --section right
 ```
 
 ## Command line
@@ -112,6 +123,7 @@ dbctl remove app-db [--keep-data]
 ```bash
 tests/test-dbctl.sh                 # every engine, native and Docker (~15 min)
 tests/test-dbctl.sh native redis    # one mode, chosen engines
+tests/test-migration.sh             # moving native and Docker servers over from OmaDB
 ```
 
 Creates throwaway `zt-*` servers and checks, from the host over TCP: the right
@@ -122,10 +134,10 @@ ordering, input validation, and that delete leaves nothing behind.
 ## Remove
 
 ```bash
-omarchy plugin remove blackcode.omadb
+omarchy plugin remove blackcode.omadbngin
 ```
 
 Servers keep running until you delete them, so delete them in the panel first.
-Leftovers: `ls ~/.local/share/omadb/servers` (native) and
-`docker ps -a --filter label=omadb.managed=1` (Docker). Downloaded engines live in
-`~/.local/share/omadb/engines`.
+Leftovers: `ls ~/.local/share/omadbngin/servers` (native) and
+`docker ps -a --filter label=omadbngin.managed=1` (Docker). Downloaded engines live in
+`~/.local/share/omadbngin/engines`.

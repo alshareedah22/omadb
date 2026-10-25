@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "blackcode.omadb",
-  "name": "OmaDB",
+  "id": "blackcode.omadbngin",
+  "name": "OmaDBngin",
   "version": "1.4.0",
   "author": "BlackCode",
   "license": "MIT",
-  "description": "OmaDB: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, as the native engine or in Docker, started and stopped with a click",
+  "description": "OmaDBngin: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, as the native engine or in Docker, started and stopped with a click",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "OmaDB",
+    "displayName": "OmaDBngin",
     "description": "Local database servers; click to create, start, stop, connect or remove them",
     "category": "Development",
     "allowMultiple": false,

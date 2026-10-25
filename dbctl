@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Backend for the OmaDB bar widget (blackcode.omadb).
+# Backend for the OmaDBngin bar widget (blackcode.omadbngin).
 #
 # A DBngin-style manager for local database servers, in two modes:
 #
 #   native  The engine itself, like DBngin. Official builds of each version are
-#           downloaded once into ~/.local/share/omadb/engines/<engine>/<version>,
+#           downloaded once into ~/.local/share/omadbngin/engines/<engine>/<version>,
 #           every server gets its own data directory under
-#           ~/.local/share/omadb/servers/<name>, and runs as the systemd user
-#           service omadb-<name>.service. No root, no system packages.
-#   docker  A container named omadb-<name>, labelled omadb.managed=1, with its
-#           data in the named volume omadb-<name>.
+#           ~/.local/share/omadbngin/servers/<name>, and runs as the systemd user
+#           service omadbngin-<name>.service. No root, no system packages.
+#   docker  A container named omadbngin-<name>, labelled omadbngin.managed=1, with its
+#           data in the named volume omadbngin-<name>.
 #
 # Both listen on 127.0.0.1 only. Servers this plugin did not create are never touched.
 #
@@ -30,9 +30,9 @@
 
 set -euo pipefail
 
-PREFIX="omadb-"
-LABEL="omadb.managed=1"
-HOME_DIR="${OMADB_HOME:-$HOME/.local/share/omadb}"
+PREFIX="omadbngin-"
+LABEL="omadbngin.managed=1"
+HOME_DIR="${OMADBNGIN_HOME:-$HOME/.local/share/omadbngin}"
 ENGINES_DIR="$HOME_DIR/engines"
 SERVERS_DIR="$HOME_DIR/servers"
 UNIT_DIR="$HOME/.config/systemd/user"
@@ -77,7 +77,7 @@ mode_of() {
   if [[ -f $(server_dir "$1")/server.json ]]; then
     echo native
   elif command -v docker >/dev/null &&
-    [[ $(docker inspect -f '{{index .Config.Labels "omadb.managed"}}' "$(container "$1")" 2>/dev/null) == 1 ]]; then
+    [[ $(docker inspect -f '{{index .Config.Labels "omadbngin.managed"}}' "$(container "$1")" 2>/dev/null) == 1 ]]; then
     echo docker
   fi
 }
@@ -93,7 +93,7 @@ field_of() {
   if [[ $MODE == native ]]; then
     jq -r ".$2" "$(server_dir "$1")/server.json"
   else
-    docker inspect -f "{{index .Config.Labels \"omadb.$2\"}}" "$(container "$1")"
+    docker inspect -f "{{index .Config.Labels \"omadbngin.$2\"}}" "$(container "$1")"
   fi
 }
 
@@ -105,7 +105,7 @@ port_taken() {
     jq -e --argjson p "$p" 'select(.port == $p)' "$SERVERS_DIR"/*/server.json >/dev/null 2>&1 && return 0
   fi
   if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-    docker ps -a --filter "label=$LABEL" --filter "label=omadb.port=$p" -q | grep -q . && return 0
+    docker ps -a --filter "label=$LABEL" --filter "label=omadbngin.port=$p" -q | grep -q . && return 0
   fi
   return 1
 }
@@ -369,9 +369,9 @@ write_unit() {
   [[ $engine == postgresql ]] && kill=SIGINT # fast shutdown, no waiting on clients
   mkdir -p "$UNIT_DIR"
   cat >"$UNIT_DIR/$(unit "$name")" <<EOF
-# Managed by OmaDB (blackcode.omadb). Edit the server in the panel, not here.
+# Managed by OmaDBngin (blackcode.omadbngin). Edit the server in the panel, not here.
 [Unit]
-Description=OmaDB $name ($(engine_field "$engine" title) $exact)
+Description=OmaDBngin $name ($(engine_field "$engine" title) $exact)
 
 [Service]
 Type=simple
@@ -496,28 +496,130 @@ create_docker() {
     ;;
   esac
 
+  docker_run "$name" "$engine" "$version" "$port" "$autostart" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" \
+    "${env[@]}" "${cmd[@]}"
+
+  if [[ $engine == mysql || $engine == mariadb ]] && ! [[ $user == root && -z $pass ]]; then
+    echo "Setting up user $user…" >&2
+    mysql_apply "$(mysql_setup_sql "$user" "$pass")" docker exec -i "$(container "$name")" "$engine" -h127.0.0.1 -uroot
+  fi
+}
+
+# The managed container itself; env and cmd follow as: <env count> <env…> <cmd…>.
+docker_run() {
+  local name=$1 engine=$2 version=$3 port=$4 autostart=$5 user=$6 pass=$7 image=$8 inner=$9 data=${10} n=${11}
+  shift 11
+  local env=("${@:1:n}") cmd=("${@:n+1}")
   local restart=no
   [[ $autostart == on ]] && restart=unless-stopped
 
   docker run -d --quiet \
     --name "$(container "$name")" \
     --label "$LABEL" \
-    --label "omadb.name=$name" \
-    --label "omadb.engine=$engine" \
-    --label "omadb.version=$version" \
-    --label "omadb.port=$port" \
-    --label "omadb.user=$user" \
-    --label "omadb.password=$pass" \
+    --label "omadbngin.name=$name" \
+    --label "omadbngin.engine=$engine" \
+    --label "omadbngin.version=$version" \
+    --label "omadbngin.port=$port" \
+    --label "omadbngin.user=$user" \
+    --label "omadbngin.password=$pass" \
     --restart "$restart" \
     -p "127.0.0.1:$port:$inner" \
     -v "$(container "$name"):$data" \
     "${env[@]}" \
     "$image" "${cmd[@]}" >/dev/null
+}
 
-  if [[ $engine == mysql || $engine == mariadb ]] && ! [[ $user == root && -z $pass ]]; then
-    echo "Setting up user $user…" >&2
-    mysql_apply "$(mysql_setup_sql "$user" "$pass")" docker exec -i "$(container "$name")" "$engine" -h127.0.0.1 -uroot
+# ---- Moving from OmaDB --------------------------------------------------------
+# This plugin was called OmaDB (blackcode.omadb): data in ~/.local/share/omadb,
+# services omadb-<name>.service, containers and volumes omadb-<name> labelled
+# omadb.*. The first run after the rename moves all of it over once, keeping
+# each server's data, port, credentials, autostart and running state.
+
+LEGACY_HOME="${OMADBNGIN_LEGACY_HOME:-$HOME/.local/share/omadb}"
+LEGACY_PREFIX="omadb-"
+
+migrate_native() {
+  local s dir name engine exact port user base auth=() running=() enabled=()
+  for s in "$LEGACY_HOME"/servers/*/server.json; do
+    [[ -f $s ]] || continue
+    name=$(jq -r .name "$s")
+    systemctl --user is-active --quiet "$LEGACY_PREFIX$name.service" && running+=("$name")
+    systemctl --user is-enabled --quiet "$LEGACY_PREFIX$name.service" 2>/dev/null && enabled+=("$name")
+    systemctl --user disable --now --quiet "$LEGACY_PREFIX$name.service" 2>/dev/null || true
+    rm -f "$UNIT_DIR/$LEGACY_PREFIX$name.service"
+  done
+  systemctl --user daemon-reload 2>/dev/null || true
+  mv "$LEGACY_HOME" "$HOME_DIR"
+  for s in "$SERVERS_DIR"/*/server.json; do
+    [[ -f $s ]] || continue
+    dir=${s%/server.json}
+    name=$(jq -r .name "$s")
+    engine=$(jq -r .engine "$s")
+    exact=$(jq -r .exact "$s")
+    port=$(jq -r .port "$s")
+    user=$(jq -r '.user // ""' "$s")
+    base="$ENGINES_DIR/$engine/$exact"
+    # Redis/Valkey configs name their data directory by absolute path.
+    [[ -f $dir/$engine.conf ]] && sed -i "s#$LEGACY_HOME/#$HOME_DIR/#g" "$dir/$engine.conf"
+    auth=()
+    [[ $engine == mongodb && -n $user ]] && auth=(auth)
+    write_unit "$name" "$engine" "$exact" "$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$port" "${auth[@]}")")"
+    [[ " ${enabled[*]} " == *" $name "* ]] && systemctl --user enable --quiet "$(unit "$name")"
+    [[ " ${running[*]} " == *" $name "* ]] && systemctl --user start "$(unit "$name")"
+  done
+}
+
+migrate_docker() {
+  local old name engine version port user pass image inner data restart running autostart mounts
+  command -v docker >/dev/null && docker info >/dev/null 2>&1 || return 0
+  for old in $(docker ps -a --filter "label=omadb.managed=1" --format '{{.Names}}'); do
+    name=$(docker inspect -f '{{index .Config.Labels "omadb.name"}}' "$old")
+    [[ -n $name && -z $(mode_of "$name") ]] || continue
+    engine=$(docker inspect -f '{{index .Config.Labels "omadb.engine"}}' "$old")
+    version=$(docker inspect -f '{{index .Config.Labels "omadb.version"}}' "$old")
+    port=$(docker inspect -f '{{index .Config.Labels "omadb.port"}}' "$old")
+    user=$(docker inspect -f '{{index .Config.Labels "omadb.user"}}' "$old")
+    pass=$(docker inspect -f '{{index .Config.Labels "omadb.password"}}' "$old")
+    image=$(docker inspect -f '{{.Config.Image}}' "$old")
+    restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$old")
+    running=$(docker inspect -f '{{.State.Running}}' "$old")
+    data=$(docker inspect -f '{{range .Mounts}}{{if eq .Name "'"$old"'"}}{{.Destination}}{{end}}{{end}}' "$old")
+    inner=$(docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{$p}}{{end}}' "$old")
+    inner=${inner%%/*}
+    autostart=off
+    [[ $restart == unless-stopped || $restart == always ]] && autostart=on
+    [[ -n $data && -n $inner ]] || { echo "dbctl: left $old as it was: cannot read its volume or port" >&2; continue; }
+    echo "Moving container $old to $(container "$name")…" >&2
+    docker stop "$old" >/dev/null
+    # Copy the data into a volume with the new name; the old volume stays until you remove it.
+    docker volume create "$(container "$name")" >/dev/null
+    if ! docker run --rm -v "$old:/from" -v "$(container "$name"):/to" --entrypoint sh "$image" -c 'cp -a /from/. /to/'; then
+      docker volume rm "$(container "$name")" >/dev/null 2>&1 || true
+      [[ $running == true ]] && docker start "$old" >/dev/null
+      echo "dbctl: left $old as it was: copying its data failed" >&2
+      continue
+    fi
+    local cmd=() env=() e
+    mapfile -t cmd < <(docker inspect -f '{{range .Config.Cmd}}{{println .}}{{end}}' "$old" | sed '/^$/d')
+    # The settings dbctl passed at creation (the image's own variables come back by themselves).
+    while IFS= read -r e; do [[ -n $e ]] && env+=(-e "$e"); done < <(
+      docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$old" | grep -E '^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_')
+    docker rm "$old" >/dev/null
+    docker_run "$name" "$engine" "$version" "$port" "$autostart" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" \
+      "${env[@]}" "${cmd[@]}"
+    [[ $running == true ]] || docker stop "$(container "$name")" >/dev/null
+    echo "dbctl: $name now uses volume $(container "$name"); the old volume $old can be removed with: docker volume rm $old" >&2
+  done
+}
+
+migrate_legacy() {
+  # Only for the default locations (tests set both), and only once: the new directory existing means done.
+  [[ -z ${OMADBNGIN_HOME:-} || -n ${OMADBNGIN_LEGACY_HOME:-} ]] || return 0
+  if [[ ! -e $HOME_DIR && -d $LEGACY_HOME ]]; then
+    echo "Moving OmaDB servers to OmaDBngin…" >&2
+    migrate_native
   fi
+  migrate_docker
 }
 
 # ---- Commands ---------------------------------------------------------------
@@ -546,13 +648,13 @@ cmd_state() {
     if [[ -n $ids ]]; then
       # shellcheck disable=SC2086
       docker_services=$(docker inspect $ids | jq -c '[.[] | {
-        name: .Config.Labels["omadb.name"],
-        engine: .Config.Labels["omadb.engine"],
-        version: .Config.Labels["omadb.version"],
-        exact: .Config.Labels["omadb.version"],
-        port: (.Config.Labels["omadb.port"] | tonumber),
-        user: .Config.Labels["omadb.user"],
-        password: (.Config.Labels["omadb.password"] // ""),
+        name: .Config.Labels["omadbngin.name"],
+        engine: .Config.Labels["omadbngin.engine"],
+        version: .Config.Labels["omadbngin.version"],
+        exact: .Config.Labels["omadbngin.version"],
+        port: (.Config.Labels["omadbngin.port"] | tonumber),
+        user: .Config.Labels["omadbngin.user"],
+        password: (.Config.Labels["omadbngin.password"] // ""),
         created: .Created,
         mode: "docker",
         state: .State.Status,
@@ -730,17 +832,21 @@ cmd_client() {
     [[ $(docker inspect -f '{{.State.Running}}' "$c") == true ]] || docker start "$c" >/dev/null
   fi
   # %q keeps passwords with shell characters intact; a moment for a just-started server.
-  omarchy launch tui --app-id="omadb-$1" bash -c "sleep 0.5; $(printf '%q ' "${args[@]}")"
+  omarchy launch tui --app-id="omadbngin-$1" bash -c "sleep 0.5; $(printf '%q ' "${args[@]}")"
 }
 
 cmd_logs() {
   require_managed "${1:-}"
   if [[ $MODE == native ]]; then
-    omarchy launch tui --app-id="omadb-logs" journalctl --user -u "$(unit "$1")" -f -n 200 -o cat
+    omarchy launch tui --app-id="omadbngin-logs" journalctl --user -u "$(unit "$1")" -f -n 200 -o cat
   else
-    omarchy launch tui --app-id="omadb-logs" docker logs -f --tail 200 "$(container "$1")"
+    omarchy launch tui --app-id="omadbngin-logs" docker logs -f --tail 200 "$(container "$1")"
   fi
 }
+
+case "${1:-}" in
+state | create | start | stop | restart | remove | autostart | url | copy | client | logs | port | install) migrate_legacy ;;
+esac
 
 case "${1:-}" in
 state) cmd_state ;;

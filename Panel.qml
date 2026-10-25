@@ -6,8 +6,8 @@ import qs.Commons
 
 Panel {
   id: root
-  moduleName: "blackcode.omadb"
-  ipcTarget: "blackcode.omadb"
+  moduleName: "blackcode.omadbngin"
+  ipcTarget: "blackcode.omadbngin"
   manageIpc: true
 
   // ---- Settings (shell.json → this widget's bar entry; see manifest schema) ----
@@ -234,18 +234,18 @@ Panel {
   Process {
     id: eventsProc
     running: root.dockerUp
-    command: ["docker", "events", "--filter", "label=omadb.managed=1", "--filter", "type=container", "--format", "{{.Action}}"]
+    command: ["docker", "events", "--filter", "label=omadbngin.managed=1", "--filter", "type=container", "--format", "{{.Action}}"]
     stdout: SplitParser { onRead: function(line) { refreshTimer.restart() } }
     onExited: eventsRestart.restart()
   }
 
-  // Native servers: systemd logs every start and stop of an omadb-* unit.
+  // Native servers: systemd logs every start and stop of an omadbngin-* unit.
   Process {
     id: nativeEventsProc
     running: true
-    command: ["journalctl", "--user", "-f", "-n", "0", "-o", "cat", "-u", "omadb-*.service"]
-    // Only systemd's own lines ("Started OmaDB …", "omadb-x.service: Failed …"), not server logs.
-    stdout: SplitParser { onRead: function(line) { if (/OmaDB|omadb-[^ ]*\.service/.test(String(line))) refreshTimer.restart() } }
+    command: ["journalctl", "--user", "-f", "-n", "0", "-o", "cat", "-u", "omadbngin-*.service"]
+    // Only systemd's own lines ("Started OmaDBngin …", "omadbngin-x.service: Failed …"), not server logs.
+    stdout: SplitParser { onRead: function(line) { if (/OmaDBngin|omadbngin-[^ ]*\.service/.test(String(line))) refreshTimer.restart() } }
     onExited: nativeEventsRestart.restart()
   }
 
@@ -414,7 +414,7 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: "OmaDB"
+            text: "OmaDBngin"
             color: root.fg
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
@@ -775,7 +775,7 @@ Panel {
           const user = (u ? "User " + u : "No user") + (passField.text ? ", with password" : ", no password")
             + ((e === "mysql" || e === "mariadb") && passField.text && u !== "root" ? " (root gets the same password)" : "") + ". "
           if (root.newMode === "docker") return user + "Runs in a Docker container; data is kept in a Docker volume until you delete the server."
-          return user + "Runs the engine itself: 󰇚 versions are downloaded once to ~/.local/share/omadb, data stays there until you delete the server."
+          return user + "Runs the engine itself: 󰇚 versions are downloaded once to ~/.local/share/omadbngin, data stays there until you delete the server."
         }
         color: Qt.darker(root.fg, 1.6)
       }
