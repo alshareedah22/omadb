@@ -337,13 +337,39 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.labelStyle === "Icon only" || root.runningCount === 0 ? "󰆼" : "󰆼 " + root.runningCount
+    // The label is drawn by barIcon below: a color database icon plus the running count.
+    text: "󰆼"
+    labelVisible: false
+    fixedWidth: vertical ? -1 : barIcon.implicitWidth + Style.spaceReal(6) * 2
     fontSize: Style.font.caption
     horizontalMargin: 6
     tooltipText: root.services.length === 0 ? "Databases" : root.services.map(function(s) {
       return (s.running ? "● " : "○ ") + s.name + "  :" + s.port
     }).join("\n")
     onPressed: function(b) { root.toggle() }
+    Row {
+      id: barIcon
+      anchors.centerIn: parent
+      spacing: Math.round(Style.font.caption * 0.3)
+      Image {
+        anchors.verticalCenter: parent.verticalCenter
+        source: Qt.resolvedUrl("icon.svg")
+        width: Math.round(Style.font.caption * 1.35)
+        height: width
+        sourceSize: Qt.size(width * 2, height * 2)
+        smooth: true
+        opacity: root.runningCount > 0 ? 1 : 0.55
+      }
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.labelStyle !== "Icon only" && root.runningCount > 0
+        text: String(root.runningCount)
+        color: button.foreground
+        font.family: button.fontFamily
+        font.pixelSize: Style.font.caption
+        renderType: Text.NativeRendering
+      }
+    }
   }
 
   // ---- Popup ----
@@ -367,15 +393,15 @@ Panel {
         width: parent.width
         implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
 
-        Text {
+        Image {
           id: heroIcon
-          textFormat: Text.PlainText
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
-          text: "󰆼"
-          color: root.fg
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.display
+          source: Qt.resolvedUrl("icon.svg")
+          width: Math.round(Style.font.display * 1.25)
+          height: width
+          sourceSize: Qt.size(width * 2, height * 2)
+          smooth: true
         }
 
         Column {

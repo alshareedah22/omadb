@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -1.5 64 64">
+  <!-- OmaDB: a database as three stacked disks, blue to violet. -->
+  <defs>
+    <linearGradient id="d1" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#0369a1"/>
+      <stop offset="0.45" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#075985"/>
+    </linearGradient>
+    <linearGradient id="d2" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#4338ca"/>
+      <stop offset="0.45" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#3730a3"/>
+    </linearGradient>
+    <linearGradient id="d3" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#7e22ce"/>
+      <stop offset="0.45" stop-color="#c084fc"/>
+      <stop offset="1" stop-color="#6b21a8"/>
+    </linearGradient>
+    <linearGradient id="cap" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#e0f2fe"/>
+      <stop offset="1" stop-color="#7dd3fc"/>
+    </linearGradient>
+  </defs>
+  <path d="M10 40 v9 a22 6.5 0 0 0 44 0 v-9 a22 6.5 0 0 1 -44 0 z" fill="url(#d3)"/>
+  <path d="M10 26 v9 a22 6.5 0 0 0 44 0 v-9 a22 6.5 0 0 1 -44 0 z" fill="url(#d2)"/>
+  <path d="M10 12 v9 a22 6.5 0 0 0 44 0 v-9 z" fill="url(#d1)"/>
+  <ellipse cx="32" cy="12" rx="22" ry="6.5" fill="url(#cap)"/>
+  <ellipse cx="25" cy="10.5" rx="8" ry="2" fill="#ffffff" opacity="0.55"/>
+</svg>
