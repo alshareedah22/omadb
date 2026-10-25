@@ -2,13 +2,20 @@
 
 # Backend for the OmaDB bar widget (blackcode.omadb).
 #
-# A DBngin-style manager for local database servers. Each service is a Docker
-# container labelled omadb.managed=1, published on 127.0.0.1 only, with its
-# data in a named volume (omadb-<name>) so it survives stop, start and image
-# updates. Containers this plugin did not create are never touched.
+# A DBngin-style manager for local database servers, in two modes:
 #
-#   dbctl state                     JSON: docker status, engines, services
-#   dbctl create <engine> <version> <name> <port> <autostart:on|off>
+#   native  The engine itself, like DBngin. Official builds of each version are
+#           downloaded once into ~/.local/share/omadb/engines/<engine>/<version>,
+#           every server gets its own data directory under
+#           ~/.local/share/omadb/servers/<name>, and runs as the systemd user
+#           service omadb-<name>.service. No root, no system packages.
+#   docker  A container named omadb-<name>, labelled omadb.managed=1, with its
+#           data in the named volume omadb-<name>.
+#
+# Both listen on 127.0.0.1 only. Servers this plugin did not create are never touched.
+#
+#   dbctl state                     JSON: docker status, engines, servers
+#   dbctl create <engine> <version> <name> <port> <autostart:on|off> [native|docker]
 #   dbctl start|stop|restart <name>
 #   dbctl remove <name> [--keep-data]
 #   dbctl autostart <name> on|off
@@ -17,24 +24,29 @@
 #   dbctl client <name>             open the engine's CLI client in a terminal
 #   dbctl logs <name>               follow the server log in a terminal
 #   dbctl port <engine>             next free port for an engine
+#   dbctl install <engine> <version>  download a native engine without creating a server
 
 set -euo pipefail
 
 PREFIX="omadb-"
 LABEL="omadb.managed=1"
+HOME_DIR="${OMADB_HOME:-$HOME/.local/share/omadb}"
+ENGINES_DIR="$HOME_DIR/engines"
+SERVERS_DIR="$HOME_DIR/servers"
+UNIT_DIR="$HOME/.config/systemd/user"
 
 fail() {
   echo "dbctl: $*" >&2
   exit 1
 }
 
-# engine|title|default port|versions (first is the default)
+# engine|title|default port|version lines (first is the default)
 ENGINES=(
   "postgresql|PostgreSQL|5432|18 17 16 15 14"
-  "mysql|MySQL|3306|8.4 8.0 9"
+  "mysql|MySQL|3306|9.7 8.4 8.0"
   "mariadb|MariaDB|3306|11.8 11.4 10.11"
   "redis|Redis|6379|8 7"
-  "valkey|Valkey|6379|8"
+  "valkey|Valkey|6379|9 8"
   "mongodb|MongoDB|27017|8 7"
 )
 
@@ -55,23 +67,44 @@ engine_field() {
 }
 
 container() { echo "$PREFIX$1"; }
+unit() { echo "$PREFIX$1.service"; }
+server_dir() { echo "$SERVERS_DIR/$1"; }
 
-require_managed() {
-  local label
-  label=$(docker inspect -f '{{index .Config.Labels "omadb.managed"}}' "$(container "$1")" 2>/dev/null) ||
-    fail "no service named $1"
-  [[ $label == 1 ]] || fail "$1 is not managed by OmaDB"
+# docker | native | "" for a name nobody owns
+mode_of() {
+  if [[ -f $(server_dir "$1")/server.json ]]; then
+    echo native
+  elif command -v docker >/dev/null &&
+    [[ $(docker inspect -f '{{index .Config.Labels "omadb.managed"}}' "$(container "$1")" 2>/dev/null) == 1 ]]; then
+    echo docker
+  fi
 }
 
-label_of() {
-  docker inspect -f "{{index .Config.Labels \"omadb.$2\"}}" "$(container "$1")"
+require_managed() {
+  [[ -n ${1:-} ]] || fail "missing server name"
+  MODE=$(mode_of "$1")
+  [[ -n $MODE ]] || fail "no server named $1"
+}
+
+# field of a server, either mode
+field_of() {
+  if [[ $MODE == native ]]; then
+    jq -r ".$2" "$(server_dir "$1")/server.json"
+  else
+    docker inspect -f "{{index .Config.Labels \"omadb.$2\"}}" "$(container "$1")"
+  fi
 }
 
 port_taken() {
   local p=$1
   ss -ltnH "sport = :$p" 2>/dev/null | grep -q . && return 0
-  # Stopped services still own their port.
-  docker ps -a --filter "label=$LABEL" --filter "label=omadb.port=$p" -q | grep -q . && return 0
+  # Stopped servers still own their port.
+  if compgen -G "$SERVERS_DIR/*/server.json" >/dev/null; then
+    jq -e --argjson p "$p" 'select(.port == $p)' "$SERVERS_DIR"/*/server.json >/dev/null 2>&1 && return 0
+  fi
+  if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    docker ps -a --filter "label=$LABEL" --filter "label=omadb.port=$p" -q | grep -q . && return 0
+  fi
   return 1
 }
 
@@ -88,49 +121,256 @@ docker_status() {
   echo running
 }
 
-cmd_state() {
-  local status engines services="[]"
-  status=$(docker_status)
+# ---- Native engines: resolve, download, install ----------------------------
 
-  engines=$(for e in "${ENGINES[@]}"; do
-    IFS='|' read -r id title port versions <<<"$e"
-    jq -nc --arg id "$id" --arg title "$title" --argjson port "$port" --arg versions "$versions" \
-      '{id: $id, title: $title, port: $port, versions: ($versions | split(" "))}'
-  done | jq -sc .)
-
-  if [[ $status == running ]]; then
-    local ids
-    ids=$(docker ps -aq --filter "label=$LABEL")
-    if [[ -n $ids ]]; then
-      # shellcheck disable=SC2086
-      services=$(docker inspect $ids | jq -c '[.[] | {
-        name: .Config.Labels["omadb.name"],
-        engine: .Config.Labels["omadb.engine"],
-        version: .Config.Labels["omadb.version"],
-        port: (.Config.Labels["omadb.port"] | tonumber),
-        created: .Created,
-        state: .State.Status,
-        health: (.State.Health.Status // ""),
-        running: .State.Running,
-        autostart: (.HostConfig.RestartPolicy.Name == "unless-stopped" or .HostConfig.RestartPolicy.Name == "always")
-      }] | sort_by(.created)')
-    fi
-  fi
-
-  jq -nc --arg docker "$status" --argjson engines "$engines" --argjson services "$services" \
-    '{docker: $docker, engines: $engines, services: $services}'
+# Newest release tag in a GitHub repo matching a line, e.g. 8 -> 8.2.3
+github_latest() {
+  local repo=$1 line=$2
+  curl -fsSL "https://api.github.com/repos/$repo/releases?per_page=100" |
+    jq -r '.[] | select(.prerelease | not) | .tag_name' | sed 's/^v//' |
+    grep -E "^${line//./\\.}\.[0-9]+(\.[0-9]+)?$" | sort -V | tail -1
 }
 
-cmd_create() {
-  local engine=${1:-} version=${2:-} name=${3:-} port=${4:-} autostart=${5:-off}
-  [[ -n $engine && -n $version && -n $name ]] || fail "usage: create <engine> <version> <name> <port> <on|off>"
-  [[ $name =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "name: lowercase letters, digits and dashes"
-  [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
-  [[ -z $port ]] && port=$(next_port "$engine")
-  [[ $port =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || fail "port must be 1024–65535"
-  docker inspect "$(container "$name")" >/dev/null 2>&1 && fail "a service named $name already exists"
-  port_taken "$port" && fail "port $port is already in use"
+# "<exact version> <download url>" for an engine line
+resolve() {
+  local engine=$1 line=$2 v url
+  case $engine in
+  postgresql)
+    v=$(github_latest theseus-rs/postgresql-binaries "$line")
+    url="https://github.com/theseus-rs/postgresql-binaries/releases/download/$v/postgresql-$v-x86_64-unknown-linux-gnu.tar.gz"
+    ;;
+  mysql)
+    v=$(git ls-remote --tags https://github.com/mysql/mysql-server.git 2>/dev/null |
+      grep -oE "refs/tags/mysql-${line//./\\.}\.[0-9]+$" | sed 's|refs/tags/mysql-||' | sort -V | tail -1)
+    url="https://cdn.mysql.com/Downloads/MySQL-$line/mysql-$v-linux-glibc2.28-x86_64-minimal.tar.xz"
+    # Superseded releases move from the CDN to the archive.
+    curl -fsIL -o /dev/null "$url" ||
+      url="https://downloads.mysql.com/archives/get/p/23/file/mysql-$v-linux-glibc2.28-x86_64-minimal.tar.xz"
+    ;;
+  mariadb)
+    read -r v url < <(curl -fsSL "https://downloads.mariadb.org/rest-api/mariadb/$line/latest/" |
+      jq -r '.releases | to_entries[0].value as $r | $r.files[]
+        | select(.os == "Linux" and .cpu == "x86_64" and (.file_name | test("linux-systemd-x86_64\\.tar\\.gz$")))
+        | "\($r.release_id) \(.file_download_url)"' | head -1)
+    url=${url/http:/https:}
+    ;;
+  redis)
+    v=$(github_latest redis/redis "$line")
+    url="https://download.redis.io/releases/redis-$v.tar.gz"
+    ;;
+  valkey)
+    v=$(github_latest valkey-io/valkey "$line")
+    url="https://download.valkey.io/releases/valkey-$v-noble-x86_64.tar.gz"
+    ;;
+  mongodb)
+    read -r v url < <(curl -fsSL https://downloads.mongodb.org/full.json |
+      jq -r --arg line "$line." '[.versions[] | select(.production_release and (.version | startswith($line)))][0]
+        | .version as $v | .downloads[] | select(.target == "ubuntu2404" and .arch == "x86_64" and .edition == "targeted")
+        | "\($v) \(.archive.url)"' | head -1)
+    ;;
+  esac
+  [[ -n ${v:-} && -n ${url:-} ]] || fail "could not find a $engine $line download (offline?)"
+  echo "$v $url"
+}
 
+installed_exact() {
+  # newest installed exact version for a line
+  local d="$ENGINES_DIR/$1"
+  [[ -d $d ]] || return 0
+  find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E "^${2//./\\.}\." | grep -v '\.tmp$' | sort -V | tail -1
+}
+
+fetch() {
+  local url=$1 out=$2
+  curl -fL --retry 3 -o "$out" "$url" 2>/dev/null || fail "download failed: $url"
+}
+
+# Download (or build) an engine line once; prints the install directory.
+ensure_engine() {
+  local engine=$1 line=$2 exact
+  exact=$(installed_exact "$engine" "$line")
+  if [[ -n $exact ]]; then
+    add_compat "$ENGINES_DIR/$engine/$exact"
+    echo "$ENGINES_DIR/$engine/$exact"
+    return
+  fi
+
+  mkdir -p "$ENGINES_DIR/$engine" "$HOME_DIR/tmp"
+  exec 9>"$HOME_DIR/tmp/$engine-$line.lock"
+  flock 9
+  exact=$(installed_exact "$engine" "$line")
+  if [[ -n $exact ]]; then echo "$ENGINES_DIR/$engine/$exact"; return; fi
+
+  local v url
+  read -r v url < <(resolve "$engine" "$line")
+  local dest="$ENGINES_DIR/$engine/$v" work="$ENGINES_DIR/$engine/$v.tmp"
+  local archive="$HOME_DIR/tmp/${url##*/}"
+  rm -rf "$work"
+  mkdir -p "$work"
+  echo "Downloading $(engine_field "$engine" title) $v…" >&2
+
+  if [[ $engine == valkey ]] && ! curl -fsIL -o /dev/null "$url"; then
+    url="https://github.com/valkey-io/valkey/archive/refs/tags/$v.tar.gz"
+    archive="$HOME_DIR/tmp/valkey-$v-src.tar.gz"
+  fi
+  fetch "$url" "$archive"
+
+  if [[ $engine == redis || $archive == *-src.tar.gz ]]; then
+    # Built from source: a minute or so, no extra dependencies.
+    local src="$HOME_DIR/tmp/$engine-$v-src"
+    rm -rf "$src"
+    mkdir -p "$src"
+    tar -xzf "$archive" -C "$src" --strip-components=1
+    echo "Building $(engine_field "$engine" title) $v…" >&2
+    # Only the server and CLI: Redis 8's full build also wants cmake for optional modules.
+    make -C "$src/src" -j"$(nproc)" BUILD_TLS=no MALLOC=libc "$engine-server" "$engine-cli" >/dev/null 2>&1 ||
+      fail "building $engine $v failed"
+    mkdir -p "$work/bin"
+    cp "$src"/src/"$engine"-server "$src"/src/"$engine"-cli "$work/bin/"
+    rm -rf "$src"
+  else
+    tar -xf "$archive" -C "$work" --strip-components=1
+  fi
+  rm -f "$archive"
+
+  if [[ $engine == mongodb ]]; then ensure_mongosh "$work"; fi
+  trim_engine "$work"
+  add_compat "$work"
+  mv "$work" "$dest"
+  echo "$dest"
+}
+
+# Drop what a local dev server never uses: test suites, the sharding router,
+# and debug symbols (MariaDB ships unstripped, ~1.4 GB → ~300 MB).
+trim_engine() {
+  rm -rf "$1"/mariadb-test "$1"/mysql-test "$1"/sql-bench "$1"/bin/mongos "$1"/bin/install_compass \
+    "$1"/bin/mariadb-test* "$1"/bin/mysql-test* "$1"/lib/*.a
+  if command -v strip >/dev/null; then
+    find "$1/bin" "$1/lib" -type f \( -perm -u+x -o -name '*.so*' \) -exec strip --strip-debug {} + 2>/dev/null || true
+  fi
+}
+
+# Upstream builds link libncurses.so.6 / libtinfo.so.6; Arch ships the same
+# library as libncursesw.so.6. Point the missing names at it, for this engine only.
+add_compat() {
+  local missing lib
+  missing=$(find "$1/bin" -maxdepth 1 -type f -perm -u+x -exec ldd {} + 2>/dev/null |
+    awk '/not found/ {print $1}' | sort -u)
+  for lib in $missing; do
+    case $lib in
+    libncurses.so.6 | libtinfo.so.6)
+      mkdir -p "$1/compat"
+      ln -sf /usr/lib/libncursesw.so.6 "$1/compat/$lib"
+      ;;
+    libcrypt.so.1)
+      # Arch's libxcrypt-compat package, unpacked next to this engine only.
+      local url pkg="$HOME_DIR/tmp/libxcrypt-compat.pkg.tar.zst" tmp="$HOME_DIR/tmp/libxcrypt-compat"
+      url=$(pacman -Sp libxcrypt-compat 2>/dev/null | tail -1)
+      [[ $url == http* ]] || continue
+      fetch "$url" "$pkg"
+      rm -rf "$tmp"
+      mkdir -p "$tmp" "$1/compat"
+      tar --zstd -xf "$pkg" -C "$tmp" usr/lib
+      cp -a "$tmp"/usr/lib/libcrypt.so.1* "$1/compat/"
+      rm -rf "$tmp" "$pkg"
+      ;;
+    esac
+  done
+}
+
+# Run a binary from an engine with its compat libraries, if it has any.
+with_compat() {
+  local base=$1
+  shift
+  if [[ -d $base/compat ]]; then echo "env LD_LIBRARY_PATH=$base/compat $*"; else echo "$*"; fi
+}
+
+# MongoDB server builds no longer ship a shell; add mongosh next to mongod.
+ensure_mongosh() {
+  local v archive
+  v=$(curl -fsSL https://api.github.com/repos/mongodb-js/mongosh/releases/latest | jq -r .tag_name | sed 's/^v//')
+  [[ -n $v ]] || return 0
+  archive="$HOME_DIR/tmp/mongosh-$v.tgz"
+  fetch "https://downloads.mongodb.com/compass/mongosh-$v-linux-x64.tgz" "$archive"
+  tar -xzf "$archive" -C "$1/bin" --strip-components=2 --wildcards '*/bin/mongosh*'
+  rm -f "$archive"
+}
+
+# ---- Native servers ---------------------------------------------------------
+
+# The command line that runs a native server in the foreground.
+native_exec() {
+  local engine=$1 base=$2 dir=$3 port=$4
+  local data="$dir/data" run="$dir/run"
+  case $engine in
+  postgresql) echo "$base/bin/postgres -D $data -p $port -c listen_addresses=127.0.0.1 -c unix_socket_directories=$run" ;;
+  mysql) echo "$base/bin/mysqld --no-defaults --basedir=$base --datadir=$data --port=$port --bind-address=127.0.0.1 --socket=$run/mysqld.sock --pid-file=$run/mysqld.pid --mysqlx=OFF" ;;
+  mariadb) echo "$base/bin/mariadbd --no-defaults --basedir=$base --datadir=$data --port=$port --bind-address=127.0.0.1 --socket=$run/mysqld.sock --pid-file=$run/mysqld.pid" ;;
+  redis | valkey) echo "$base/bin/$engine-server --port $port --bind 127.0.0.1 --dir $data --appendonly yes --daemonize no --protected-mode no" ;;
+  mongodb) echo "$base/bin/mongod --dbpath $data --port $port --bind_ip 127.0.0.1" ;;
+  esac
+}
+
+native_init() {
+  local engine=$1 base=$2 data=$3
+  if [[ -d $base/compat ]]; then export LD_LIBRARY_PATH=$base/compat; fi
+  case $engine in
+  postgresql) "$base/bin/initdb" -D "$data" -U postgres --auth=trust -E UTF8 --no-locale >/dev/null ;;
+  mysql) "$base/bin/mysqld" --no-defaults --initialize-insecure --basedir="$base" --datadir="$data" 2>/dev/null ;;
+  mariadb)
+    "$base/scripts/mariadb-install-db" --no-defaults --basedir="$base" --datadir="$data" \
+      --auth-root-authentication-method=normal --skip-test-db >/dev/null
+    ;;
+  esac
+}
+
+write_unit() {
+  local name=$1 engine=$2 exact=$3 cmd=$4 kill=SIGTERM
+  [[ $engine == postgresql ]] && kill=SIGINT # fast shutdown, no waiting on clients
+  mkdir -p "$UNIT_DIR"
+  cat >"$UNIT_DIR/$(unit "$name")" <<EOF
+# Managed by OmaDB (blackcode.omadb). Edit the server in the panel, not here.
+[Unit]
+Description=OmaDB $name ($(engine_field "$engine" title) $exact)
+
+[Service]
+Type=simple
+ExecStart=$cmd
+KillSignal=$kill
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
+  systemctl --user daemon-reload
+}
+
+create_native() {
+  local engine=$1 version=$2 name=$3 port=$4 autostart=$5
+  local base exact dir
+  base=$(ensure_engine "$engine" "$version")
+  exact=${base##*/}
+  dir=$(server_dir "$name")
+  [[ -e $dir ]] && fail "$dir already exists"
+  mkdir -p "$dir/data" "$dir/run"
+  if ! native_init "$engine" "$base" "$dir/data"; then
+    rm -rf "$dir"
+    fail "initializing $engine $exact failed"
+  fi
+  jq -n --arg name "$name" --arg engine "$engine" --arg version "$version" --arg exact "$exact" \
+    --argjson port "$port" --arg created "$(date -Is)" \
+    '{name: $name, engine: $engine, version: $version, exact: $exact, port: $port, created: $created, mode: "native"}' \
+    >"$dir/server.json"
+  write_unit "$name" "$engine" "$exact" "$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$port")")"
+  [[ $autostart == on ]] && systemctl --user enable --quiet "$(unit "$name")"
+  systemctl --user start "$(unit "$name")"
+}
+
+create_docker() {
+  local engine=$1 version=$2 name=$3 port=$4 autostart=$5
+  [[ $(docker_status) == running ]] || fail "Docker is not running"
   local image inner data env=()
   case $engine in
   postgresql)
@@ -186,25 +426,127 @@ cmd_create() {
     "$image" >/dev/null
 }
 
+# ---- Commands ---------------------------------------------------------------
+
+cmd_state() {
+  local status engines docker_services="[]" native_services="[]" installed="[]"
+  status=$(docker_status)
+
+  engines=$(for e in "${ENGINES[@]}"; do
+    IFS='|' read -r id title port versions <<<"$e"
+    jq -nc --arg id "$id" --arg title "$title" --argjson port "$port" --arg versions "$versions" \
+      '{id: $id, title: $title, port: $port, versions: ($versions | split(" "))}'
+  done | jq -sc .)
+
+  if [[ -d $ENGINES_DIR ]]; then
+    installed=$(find "$ENGINES_DIR" -mindepth 2 -maxdepth 2 -type d ! -name '*.tmp' -printf '%P\n' |
+      jq -Rc 'split("/") | {engine: .[0], exact: .[1]}' | jq -sc .)
+  fi
+
+  if [[ $status == running ]]; then
+    local ids
+    ids=$(docker ps -aq --filter "label=$LABEL")
+    if [[ -n $ids ]]; then
+      # shellcheck disable=SC2086
+      docker_services=$(docker inspect $ids | jq -c '[.[] | {
+        name: .Config.Labels["omadb.name"],
+        engine: .Config.Labels["omadb.engine"],
+        version: .Config.Labels["omadb.version"],
+        exact: .Config.Labels["omadb.version"],
+        port: (.Config.Labels["omadb.port"] | tonumber),
+        created: .Created,
+        mode: "docker",
+        state: .State.Status,
+        health: (.State.Health.Status // ""),
+        running: .State.Running,
+        autostart: (.HostConfig.RestartPolicy.Name == "unless-stopped" or .HostConfig.RestartPolicy.Name == "always")
+      }]')
+    fi
+  fi
+
+  if compgen -G "$SERVERS_DIR/*/server.json" >/dev/null; then
+    native_services=$(for f in "$SERVERS_DIR"/*/server.json; do
+      local name active enabled state
+      name=$(jq -r .name "$f")
+      active=$(systemctl --user is-active "$(unit "$name")" 2>/dev/null || true)
+      enabled=$(systemctl --user is-enabled "$(unit "$name")" 2>/dev/null || true)
+      case $active in
+      active) state=running ;;
+      activating | reloading) state=restarting ;;
+      failed) state=failed ;;
+      *) state=exited ;;
+      esac
+      jq -c --arg state "$state" --arg enabled "$enabled" \
+        '. + {state: $state, health: "", running: ($state == "running"), autostart: ($enabled == "enabled")}' "$f"
+    done | jq -sc .)
+  fi
+
+  jq -nc --arg docker "$status" --argjson engines "$engines" --argjson installed "$installed" \
+    --argjson a "$docker_services" --argjson b "$native_services" \
+    '{docker: $docker, engines: $engines, installed: $installed, services: ($a + $b | sort_by(.created))}'
+}
+
+cmd_create() {
+  local engine=${1:-} version=${2:-} name=${3:-} port=${4:-} autostart=${5:-off} mode=${6:-docker}
+  [[ -n $engine && -n $version && -n $name ]] || fail "usage: create <engine> <version> <name> <port> <on|off> [native|docker]"
+  [[ $name =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "name: lowercase letters, digits and dashes"
+  [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
+  [[ $mode == native || $mode == docker ]] || fail "mode must be native or docker"
+  [[ -z $port ]] && port=$(next_port "$engine")
+  [[ $port =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || fail "port must be 1024–65535"
+  [[ -z $(mode_of "$name") ]] || fail "a server named $name already exists"
+  port_taken "$port" && fail "port $port is already in use"
+  "create_$mode" "$engine" "$version" "$name" "$port" "$autostart"
+}
+
+cmd_power() {
+  local action=$1 name=${2:-}
+  require_managed "$name"
+  if [[ $MODE == native ]]; then
+    systemctl --user "$action" "$(unit "$name")"
+  else
+    docker "$action" "$(container "$name")" >/dev/null
+  fi
+}
+
 cmd_remove() {
   local name=${1:-} keep=${2:-}
   require_managed "$name"
-  docker rm -f "$(container "$name")" >/dev/null
-  [[ $keep == --keep-data ]] || docker volume rm "$(container "$name")" >/dev/null 2>&1 || true
+  if [[ $MODE == native ]]; then
+    systemctl --user disable --now --quiet "$(unit "$name")" 2>/dev/null || true
+    rm -f "$UNIT_DIR/$(unit "$name")"
+    systemctl --user daemon-reload
+    if [[ $keep == --keep-data ]]; then
+      mv "$(server_dir "$name")" "$(server_dir "$name").removed-$(date +%Y%m%d-%H%M%S)"
+    else
+      rm -rf "$(server_dir "$name")"
+    fi
+  else
+    docker rm -f "$(container "$name")" >/dev/null
+    [[ $keep == --keep-data ]] || docker volume rm "$(container "$name")" >/dev/null 2>&1 || true
+  fi
 }
 
 cmd_autostart() {
-  require_managed "$1"
-  local policy=no
-  [[ ${2:-} == on ]] && policy=unless-stopped
-  docker update --restart "$policy" "$(container "$1")" >/dev/null
+  require_managed "${1:-}"
+  if [[ $MODE == native ]]; then
+    if [[ ${2:-} == on ]]; then
+      systemctl --user enable --quiet "$(unit "$1")"
+    else
+      systemctl --user disable --quiet "$(unit "$1")"
+    fi
+  else
+    local policy=no
+    [[ ${2:-} == on ]] && policy=unless-stopped
+    docker update --restart "$policy" "$(container "$1")" >/dev/null
+  fi
 }
 
 cmd_url() {
-  require_managed "$1"
+  require_managed "${1:-}"
   local engine port
-  engine=$(label_of "$1" engine)
-  port=$(label_of "$1" port)
+  engine=$(field_of "$1" engine)
+  port=$(field_of "$1" port)
   case $engine in
   postgresql) echo "postgresql://postgres@127.0.0.1:$port/postgres" ;;
   mysql | mariadb) echo "mysql://root@127.0.0.1:$port" ;;
@@ -214,38 +556,63 @@ cmd_url() {
 }
 
 cmd_client() {
-  require_managed "$1"
-  local engine c client
-  engine=$(label_of "$1" engine)
-  c=$(container "$1")
-  case $engine in
-  postgresql) client="psql -U postgres" ;;
-  mysql) client="mysql -uroot" ;;
-  mariadb) client="mariadb -uroot" ;;
-  redis) client="redis-cli" ;;
-  valkey) client="valkey-cli" ;;
-  mongodb) client="mongosh --quiet" ;;
-  esac
-  [[ $(docker inspect -f '{{.State.Running}}' "$c") == true ]] || docker start "$c" >/dev/null
-  omarchy launch tui --app-id="omadb-$1" bash -c "docker exec -it $c $client"
+  require_managed "${1:-}"
+  local engine port client
+  engine=$(field_of "$1" engine)
+  port=$(field_of "$1" port)
+  if [[ $MODE == native ]]; then
+    local base
+    base="$ENGINES_DIR/$engine/$(field_of "$1" exact)"
+    case $engine in
+    postgresql) client="$base/bin/psql -h 127.0.0.1 -p $port -U postgres" ;;
+    mysql) client="$base/bin/mysql -h127.0.0.1 -P$port -uroot" ;;
+    mariadb) client="$base/bin/mariadb -h127.0.0.1 -P$port -uroot" ;;
+    redis | valkey) client="$base/bin/$engine-cli -p $port" ;;
+    mongodb) client="$base/bin/mongosh --quiet mongodb://127.0.0.1:$port" ;;
+    esac
+    client=$(with_compat "$base" "$client")
+    systemctl --user is-active --quiet "$(unit "$1")" || systemctl --user start "$(unit "$1")"
+  else
+    local c
+    c=$(container "$1")
+    case $engine in
+    postgresql) client="psql -U postgres" ;;
+    mysql) client="mysql -uroot" ;;
+    mariadb) client="mariadb -uroot" ;;
+    redis) client="redis-cli" ;;
+    valkey) client="valkey-cli" ;;
+    mongodb) client="mongosh --quiet" ;;
+    esac
+    [[ $(docker inspect -f '{{.State.Running}}' "$c") == true ]] || docker start "$c" >/dev/null
+    client="docker exec -it $c $client"
+  fi
+  # A moment for a just-started server to accept connections.
+  omarchy launch tui --app-id="omadb-$1" bash -c "sleep 0.5; $client"
+}
+
+cmd_logs() {
+  require_managed "${1:-}"
+  if [[ $MODE == native ]]; then
+    omarchy launch tui --app-id="omadb-logs" journalctl --user -u "$(unit "$1")" -f -n 200 -o cat
+  else
+    omarchy launch tui --app-id="omadb-logs" docker logs -f --tail 200 "$(container "$1")"
+  fi
 }
 
 case "${1:-}" in
 state) cmd_state ;;
 create) shift; cmd_create "$@" ;;
-start | stop | restart)
-  require_managed "${2:-}"
-  docker "$1" "$(container "$2")" >/dev/null
-  ;;
+start | stop | restart) cmd_power "$1" "${2:-}" ;;
 remove) shift; cmd_remove "$@" ;;
 autostart) shift; cmd_autostart "$@" ;;
 url) cmd_url "${2:-}" ;;
 copy) cmd_url "${2:-}" | tr -d '\n' | wl-copy ;;
 client) cmd_client "${2:-}" ;;
-logs)
-  require_managed "${2:-}"
-  omarchy launch tui --app-id="omadb-logs" docker logs -f --tail 200 "$(container "$2")"
-  ;;
+logs) cmd_logs "${2:-}" ;;
 port) next_port "${2:-}" ;;
-*) sed -n '6,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+install)
+  [[ " $(engine_field "${2:-}" versions) " == *" ${3:-} "* ]] || fail "usage: install <engine> <version>"
+  ensure_engine "$2" "$3"
+  ;;
+*) sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

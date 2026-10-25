@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "blackcode.omadb",
   "name": "OmaDB",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "BlackCode",
   "license": "MIT",
-  "description": "OmaDB: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, started and stopped with a click",
+  "description": "OmaDB: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, as the native engine or in Docker, started and stopped with a click",
   "kinds": [
     "bar-widget"
   ],
@@ -19,7 +19,8 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "label": "Icon and count"
+      "label": "Icon and count",
+      "defaultMode": "Native"
     },
     "schema": [
       {
@@ -32,6 +33,17 @@
         ],
         "defaultValue": "Icon and count",
         "description": "Show how many servers are running next to the icon."
+      },
+      {
+        "key": "defaultMode",
+        "type": "enum",
+        "label": "New servers run as",
+        "options": [
+          "Native",
+          "Docker"
+        ],
+        "defaultValue": "Native",
+        "description": "Native downloads and runs the engine itself, like DBngin. Docker runs it in a container."
       }
     ]
   }

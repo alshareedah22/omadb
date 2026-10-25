@@ -12,6 +12,7 @@ Panel {
 
   // ---- Settings (shell.json → this widget's bar entry; see manifest schema) ----
   readonly property string labelStyle: String(setting("label", "Icon and count"))
+  readonly property string defaultMode: String(setting("defaultMode", "Native")) === "Docker" ? "docker" : "native"
 
   readonly property string ctl: decodeURIComponent(String(Qt.resolvedUrl("dbctl")).replace(/^file:\/\//, ""))
   readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
@@ -23,6 +24,8 @@ Panel {
   property string dockerStatus: "running"
   property var engines: []
   property var services: []
+  property var installed: []
+  readonly property bool dockerUp: dockerStatus === "running"
   readonly property int runningCount: services.filter(function(s) { return s.running }).length
 
   function engineInfo(id) {
@@ -34,6 +37,8 @@ Panel {
   property var queue: []
   property string busyName: ""
   property string busyLabel: ""
+  property string busyDetail: ""
+  property var stderrLines: []
   property string errorText: ""
   property string armedDelete: ""
   property string copiedName: ""
@@ -55,6 +60,8 @@ Panel {
     root.queue = root.queue.slice(1)
     root.busyName = job.name
     root.busyLabel = job.label
+    root.busyDetail = ""
+    root.stderrLines = []
     actionProc.command = job.command
     actionProc.running = true
   }
@@ -82,6 +89,7 @@ Panel {
 
   function statusText(s) {
     if (root.busyName === s.name && root.busyLabel !== "") return root.busyLabel + "…"
+    if (s.state === "failed") return "Failed · see logs"
     if (s.state === "running") return s.health === "starting" ? "Starting…" : "Running"
     if (s.state === "restarting") return "Restarting…"
     if (s.state === "created" || s.state === "exited") return "Stopped"
@@ -93,6 +101,10 @@ Panel {
   property string newVersion: ""
   property string suggestedPort: ""
   property bool newAutostart: false
+  property string newMode: defaultMode
+  function isInstalled(engine, line) {
+    return root.installed.some(function(i) { return i.engine === engine && (i.exact === line || i.exact.indexOf(line + ".") === 0) })
+  }
   readonly property var newEngineInfo: engineInfo(newEngine)
   readonly property string defaultName: {
     const base = newEngine + "-" + String(newVersion || "").split(".")[0]
@@ -115,7 +127,7 @@ Panel {
     const name = nameField.text.trim() || root.defaultName
     const port = portField.text.trim() || root.suggestedPort
     if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(name)) { root.errorText = "Name: lowercase letters, digits and dashes."; return }
-    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off"])
+    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode])
     nameField.text = ""
     portField.text = ""
     root.suggestedPort = ""
@@ -172,6 +184,7 @@ Panel {
         root.dockerStatus = s.docker || "missing"
         root.engines = s.engines || []
         root.services = s.services || []
+        root.installed = s.installed || []
         root.stateLoaded = true
       }
     }
@@ -179,11 +192,16 @@ Panel {
 
   Process {
     id: actionProc
-    stderr: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: if (text.trim() !== "") root.errorText = text.trim().split("\n").slice(-2).join("\n")
+    stderr: SplitParser {
+      onRead: function(line) {
+        const l = String(line).trim()
+        if (l === "") return
+        root.stderrLines = root.stderrLines.concat([l]).slice(-3)
+        if (l.indexOf("dbctl:") !== 0) root.busyDetail = l.replace(/…$/, "")
+      }
     }
-    onExited: {
+    onExited: function(exitCode) {
+      if (exitCode !== 0) root.errorText = root.stderrLines.slice(-2).join("\n") || "Failed."
       root.refresh()
       root.runNext()
       if (root.opened && !portProc.running) { portProc.command = [root.ctl, "port", root.newEngine]; portProc.running = true }
@@ -201,7 +219,7 @@ Panel {
   // Live updates: Docker reports every start, stop and removal of our containers.
   Process {
     id: eventsProc
-    running: root.dockerStatus === "running"
+    running: root.dockerUp
     command: ["docker", "events", "--filter", "label=omadb.managed=1", "--filter", "type=container", "--format", "{{.Action}}"]
     stdout: SplitParser { onRead: function(line) { refreshTimer.restart() } }
     onExited: eventsRestart.restart()
@@ -210,7 +228,7 @@ Panel {
   Timer {
     id: eventsRestart
     interval: 5000
-    onTriggered: if (root.dockerStatus === "running") eventsProc.running = true
+    onTriggered: if (root.dockerUp) eventsProc.running = true
   }
 
   // ---- Small building blocks ----
@@ -306,7 +324,7 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: nameField
-    contentWidth: panel.fittedContentWidth(Style.space(480))
+    contentWidth: panel.fittedContentWidth(Style.space(520))
     contentHeight: panel.fittedContentHeight(panelColumn.implicitHeight, Style.space(1100))
 
     Column {
@@ -349,9 +367,8 @@ Panel {
 
           Text {
             textFormat: Text.PlainText
-            text: root.dockerStatus !== "running" ? "DOCKER " + root.dockerStatus.toUpperCase()
-              : root.runningCount + " RUNNING  ·  " + root.services.length + " SERVERS"
-            color: root.dockerStatus !== "running" ? Color.urgent : root.dim
+            text: root.runningCount + " RUNNING  ·  " + root.services.length + " SERVERS"
+            color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: true
@@ -362,7 +379,7 @@ Panel {
 
       Text {
         width: parent.width
-        visible: root.stateLoaded && root.dockerStatus !== "running"
+        visible: root.stateLoaded && !root.dockerUp && root.newMode === "docker"
         textFormat: Text.PlainText
         wrapMode: Text.Wrap
         text: root.dockerStatus === "missing"
@@ -386,7 +403,7 @@ Panel {
         width: parent.width
         visible: root.services.length === 0
         wrapMode: Text.Wrap
-        text: root.busyLabel === "Creating" ? "Creating " + root.busyName + "… the first one of each version downloads its image."
+        text: root.busyLabel === "Creating" ? "Creating " + root.busyName + "… " + (root.busyDetail || "the first server of each version downloads it once.")
           : "No servers yet. Create one below."
       }
 
@@ -451,7 +468,8 @@ Panel {
                 textFormat: Text.PlainText
                 width: parent.width
                 elide: Text.ElideRight
-                text: root.engineInfo(row.modelData.engine).title + " " + row.modelData.version
+                text: (row.modelData.mode === "docker" ? "󰡨 " : "󰆼 ")
+                  + root.engineInfo(row.modelData.engine).title + " " + (row.modelData.exact || row.modelData.version)
                   + "  ·  :" + row.modelData.port + "  ·  "
                   + (row.armed ? "Click 󰆴 again to delete"
                     : root.copiedName === row.modelData.name ? "URL copied" : root.statusText(row.modelData))
@@ -529,6 +547,21 @@ Panel {
         fontFamily: root.fontFamily
       }
 
+      Label { text: "Run as" }
+      Flow {
+        width: parent.width
+        spacing: Style.space(6)
+        Repeater {
+          model: [{ label: "󰆼 Native engine", value: "native" }, { label: "󰡨 Docker container", value: "docker" }]
+          Chip {
+            required property var modelData
+            label: modelData.label
+            selected: root.newMode === modelData.value
+            onPicked: root.newMode = modelData.value
+          }
+        }
+      }
+
       Label { text: "Engine" }
       Flow {
         width: parent.width
@@ -552,7 +585,7 @@ Panel {
           model: root.newEngineInfo.versions
           Chip {
             required property var modelData
-            label: modelData
+            label: root.newMode === "native" && !root.isInstalled(root.newEngine, modelData) ? modelData + " 󰇚" : modelData
             selected: root.newVersion === modelData
             onPicked: root.newVersion = modelData
           }
@@ -587,7 +620,7 @@ Panel {
             id: portField
             width: parent.width
             foreground: root.fg
-            placeholderText: root.suggestedPort || String(root.newEngineInfo.port || "")
+            placeholderText: root.suggestedPort || "auto"
             Keys.onPressed: function(event) {
               if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.createService(); event.accepted = true }
               else if (event.key === Qt.Key_Escape) { root.close(); event.accepted = true }
@@ -612,9 +645,9 @@ Panel {
         Chip {
           id: createChip
           anchors.right: parent.right
-          label: root.busyLabel === "Creating" ? "Creating…" : "󰐕 Create"
+          label: root.busyLabel === "Creating" ? (root.busyDetail ? root.busyDetail.split(" ")[0] + "…" : "Creating…") : "󰐕 Create"
           selected: true
-          enabled: root.dockerStatus === "running" && root.newVersion !== "" && root.busyLabel !== "Creating"
+          enabled: (root.newMode === "native" || root.dockerUp) && root.newVersion !== "" && root.busyLabel !== "Creating"
           onPicked: root.createService()
         }
       }
@@ -624,9 +657,9 @@ Panel {
         wrapMode: Text.Wrap
         text: {
           const e = root.newEngine
-          if (e === "postgresql") return "User postgres, no password. Data is kept in a Docker volume until you delete the server."
-          if (e === "mysql" || e === "mariadb") return "User root, no password. Data is kept in a Docker volume until you delete the server."
-          return "No password. Data is kept in a Docker volume until you delete the server."
+          const user = e === "postgresql" ? "User postgres, no password. " : (e === "mysql" || e === "mariadb") ? "User root, no password. " : "No password. "
+          if (root.newMode === "docker") return user + "Runs in a Docker container; data is kept in a Docker volume until you delete the server."
+          return user + "Runs the engine itself: 󰇚 versions are downloaded once to ~/.local/share/omadb, data stays there until you delete the server."
         }
         color: Qt.darker(root.fg, 1.6)
       }
