@@ -69,7 +69,9 @@ resolve() {
       jq -r '.releases | to_entries[0].value as $r | $r.files[]
         | select(.file_name | test("linux-systemd-x86_64\\.tar\\.gz$"))
         | "\($r.release_id) \(.file_download_url) \(.checksum.sha256sum)"' | head -1)
-    entry "$v" "$sha" "${url/http:/https:}"
+    # MariaDB's own archive first: the REST link redirects to geo mirrors that can lack older releases.
+    entry "$v" "$sha" "https://archive.mariadb.org/mariadb-$v/bintar-linux-systemd-x86_64/mariadb-$v-linux-systemd-x86_64.tar.gz" \
+      "${url/http:/https:}"
     ;;
   redis)
     v=$(gh_latest redis/redis "$line")

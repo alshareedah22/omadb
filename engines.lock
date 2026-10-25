@@ -70,6 +70,7 @@
         "version": "11.8.9",
         "sha256": "32f8871a2aa38b36aa418b7f4abc6fc0c6ef1ba5a45798cacb2afa52c8a6113b",
         "urls": [
+          "https://archive.mariadb.org/mariadb-11.8.9/bintar-linux-systemd-x86_64/mariadb-11.8.9-linux-systemd-x86_64.tar.gz",
           "https://downloads.mariadb.org/rest-api/mariadb/11.8.9/mariadb-11.8.9-linux-systemd-x86_64.tar.gz"
         ]
       },
@@ -77,6 +78,7 @@
         "version": "11.4.13",
         "sha256": "3cebf63914df3154b7cb6d548337eb2be42c773aeb641110446b72e2746cfed7",
         "urls": [
+          "https://archive.mariadb.org/mariadb-11.4.13/bintar-linux-systemd-x86_64/mariadb-11.4.13-linux-systemd-x86_64.tar.gz",
           "https://downloads.mariadb.org/rest-api/mariadb/11.4.13/mariadb-11.4.13-linux-systemd-x86_64.tar.gz"
         ]
       },
@@ -84,6 +86,7 @@
         "version": "10.11.19",
         "sha256": "7efb257927f31f4422f496246b32590d0b7617f3d9dd900e575de761b302d919",
         "urls": [
+          "https://archive.mariadb.org/mariadb-10.11.19/bintar-linux-systemd-x86_64/mariadb-10.11.19-linux-systemd-x86_64.tar.gz",
           "https://downloads.mariadb.org/rest-api/mariadb/10.11.19/mariadb-10.11.19-linux-systemd-x86_64.tar.gz"
         ]
       }
