@@ -445,7 +445,7 @@ create_native() {
     } >"$dir/$engine.conf"
   fi
   jq -n --arg name "$name" --arg engine "$engine" --arg version "$version" --arg exact "$exact" \
-    --argjson port "$port" --arg created "$(date -Is)" --arg user "$user" --arg password "$pass" \
+    --argjson port "$port" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg user "$user" --arg password "$pass" \
     '{name: $name, engine: $engine, version: $version, exact: $exact, port: $port, created: $created, mode: "native",
       user: $user, password: $password}' >"$dir/server.json"
   chmod 600 "$dir/server.json"
@@ -607,7 +607,10 @@ cmd_state() {
     --argjson a "$docker_services" --argjson b "$native_services" \
     'def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
      {docker: $docker, engines: $engines, installed: $installed,
-      services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // "")) | sort_by(.created))}'
+      services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // ""))
+        | sort_by(.created | sub("\\.[0-9]+"; "") | sub("Z$"; "+00:00")
+            | capture("^(?<t>.{19})(?<s>[+-])(?<h>..):(?<m>..)$")
+            | (.t + "Z" | fromdateiso8601) - ((if .s == "+" then 1 else -1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60))))}'
 }
 
 cmd_create() {
@@ -626,7 +629,14 @@ cmd_create() {
   [[ $port =~ ^[0-9]+$ ]] && ((port >= 1024 && port <= 65535)) || fail "port must be 1024–65535"
   [[ -z $(mode_of "$name") ]] || fail "a server named $name already exists"
   port_taken "$port" && fail "port $port is already in use"
-  "create_$mode" "$engine" "$version" "$name" "$port" "$autostart" "$user" "$pass"
+  # The name was free a moment ago, so on failure everything under it is ours to undo.
+  if ! ("create_$mode" "$engine" "$version" "$name" "$port" "$autostart" "$user" "$pass"); then
+    if [[ -n $(mode_of "$name") || -e $(server_dir "$name") ]]; then
+      MODE=$(mode_of "$name")
+      if [[ -z $MODE ]]; then rm -rf "$(server_dir "$name")"; else cmd_remove "$name" >/dev/null 2>&1; fi
+    fi
+    exit 1
+  fi
 }
 
 cmd_power() {

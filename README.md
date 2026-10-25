@@ -98,6 +98,18 @@ dbctl client app-db
 dbctl remove app-db [--keep-data]
 ```
 
+## Tests
+
+```bash
+tests/test-dbctl.sh                 # every engine, native and Docker (~15 min)
+tests/test-dbctl.sh native redis    # one mode, chosen engines
+```
+
+Creates throwaway `zt-*` servers and checks, from the host over TCP: the right
+password works and wrong or missing ones are refused, data survives stop/start
+and restart, autostart, the URL, the CLI client and logs, port allocation,
+ordering, input validation, and that delete leaves nothing behind.
+
 ## Remove
 
 ```bash

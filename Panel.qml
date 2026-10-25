@@ -134,6 +134,11 @@ Panel {
     const pass = passField.text
     if (root.newEngine === "mongodb" && user !== "" && pass === "") { root.errorText = "MongoDB needs a password when you set a username."; return }
     run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode, user, pass])
+  }
+
+  // The form is cleared only once the server exists, so a failed create keeps what you typed.
+  function createFinished(ok) {
+    if (!ok) return
     nameField.text = ""
     portField.text = ""
     userField.text = ""
@@ -210,6 +215,7 @@ Panel {
     }
     onExited: function(exitCode) {
       if (exitCode !== 0) root.errorText = root.stderrLines.slice(-2).join("\n") || "Failed."
+      if (root.busyLabel === "Creating") root.createFinished(exitCode === 0)
       root.refresh()
       root.runNext()
       if (root.opened && !portProc.running) { portProc.command = [root.ctl, "port", root.newEngine]; portProc.running = true }
@@ -231,6 +237,22 @@ Panel {
     command: ["docker", "events", "--filter", "label=omadb.managed=1", "--filter", "type=container", "--format", "{{.Action}}"]
     stdout: SplitParser { onRead: function(line) { refreshTimer.restart() } }
     onExited: eventsRestart.restart()
+  }
+
+  // Native servers: systemd logs every start and stop of an omadb-* unit.
+  Process {
+    id: nativeEventsProc
+    running: true
+    command: ["journalctl", "--user", "-f", "-n", "0", "-o", "cat", "-u", "omadb-*.service"]
+    // Only systemd's own lines ("Started OmaDB …", "omadb-x.service: Failed …"), not server logs.
+    stdout: SplitParser { onRead: function(line) { if (/OmaDB|omadb-[^ ]*\.service/.test(String(line))) refreshTimer.restart() } }
+    onExited: nativeEventsRestart.restart()
+  }
+
+  Timer {
+    id: nativeEventsRestart
+    interval: 5000
+    onTriggered: nativeEventsProc.running = true
   }
 
   Timer {
@@ -477,7 +499,7 @@ Panel {
                 textFormat: Text.PlainText
                 width: parent.width
                 elide: Text.ElideRight
-                text: (row.modelData.mode === "docker" ? "󰡨 " : "󰆼 ")
+                text: row.armed ? "Click 󰆴 again to delete it and its data" : (row.modelData.mode === "docker" ? "󰡨 " : "󰆼 ")
                   + root.engineInfo(row.modelData.engine).title + " " + (row.modelData.exact || row.modelData.version)
                   + "  ·  :" + row.modelData.port + "  ·  "
                   + (row.armed ? "Click 󰆴 again to delete"
