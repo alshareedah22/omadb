@@ -1,0 +1,124 @@
+#!/bin/bash
+
+# Regenerate engines.lock: the exact build, download URL and SHA-256 that
+# `dbctl` will accept for every native engine line. Maintainer tool only; the
+# plugin itself never resolves versions or trusts an unpinned download.
+#
+#   tools/update-engines-lock            # newest patch release of every line
+#
+# Checksums come from what each upstream publishes over HTTPS (GitHub release
+# digests, MariaDB's REST API, MongoDB's full.json, redis-hashes, Valkey's
+# .sha256 files). MySQL and the Arch compat library publish no SHA-256, so
+# those files are downloaded and hashed here. Review the diff, then commit it.
+
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+LOCK="$here/engines.lock"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# Version lines: kept in step with ENGINES in dbctl.
+mapfile -t ENGINES < <(sed -n '/^ENGINES=(/,/^)/p' "$here/dbctl" | grep -oE '"[a-z]+\|[^"]+"' | tr -d '"')
+
+gh_api() { curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer $GITHUB_TOKEN"} "https://api.github.com/$1"; }
+
+# Newest non-prerelease tag of a line, and the digest of one of its assets.
+gh_latest() {
+  gh_api "repos/$1/releases?per_page=100" | jq -r --arg line "$2" '
+    [.[] | select(.prerelease | not) | .tag_name | ltrimstr("v")
+      | select(test("^" + ($line | gsub("\\."; "\\.")) + "\\.[0-9]+(\\.[0-9]+)?$"))]
+    | sort_by(split(".") | map(tonumber)) | last // empty'
+}
+gh_digest() {
+  gh_api "repos/$1/releases/tags/$2" | jq -r --arg n "$3" '.assets[] | select(.name == $n) | .digest // empty' | sed 's/^sha256://'
+}
+
+hash_of() {
+  curl -fL --retry 3 -o "$tmp/f" "$1" 2>/dev/null || { echo "download failed: $1" >&2; return 1; }
+  sha256sum "$tmp/f" | cut -d' ' -f1
+  rm -f "$tmp/f"
+}
+
+entry() { jq -nc --arg v "$1" --arg sha "$2" '{version: $v, sha256: $sha, urls: $ARGS.positional}' --args "${@:3}"; }
+
+resolve() {
+  local engine=$1 line=$2 v sha url
+  case $engine in
+  postgresql)
+    v=$(gh_latest theseus-rs/postgresql-binaries "$line")
+    local asset="postgresql-$v-x86_64-unknown-linux-gnu.tar.gz"
+    sha=$(gh_digest theseus-rs/postgresql-binaries "$v" "$asset")
+    entry "$v" "$sha" "https://github.com/theseus-rs/postgresql-binaries/releases/download/$v/$asset"
+    ;;
+  mysql)
+    v=$(git ls-remote --tags https://github.com/mysql/mysql-server.git |
+      grep -oE "refs/tags/mysql-${line//./\\.}\.[0-9]+$" | sed 's|refs/tags/mysql-||' | sort -V | tail -1)
+    # Minimal builds: glibc2.28 for 8.4+, glibc2.17 for 8.0.
+    local file cdn archive glibc
+    for glibc in 2.28 2.17; do
+      file="mysql-$v-linux-glibc$glibc-x86_64-minimal.tar.xz"
+      cdn="https://cdn.mysql.com/Downloads/MySQL-$line/$file"
+      archive="https://downloads.mysql.com/archives/get/p/23/file/$file"
+      sha=$(hash_of "$cdn" 2>/dev/null || hash_of "$archive" 2>/dev/null) && break
+    done
+    entry "$v" "$sha" "$cdn" "$archive"
+    ;;
+  mariadb)
+    read -r v url sha < <(curl -fsSL "https://downloads.mariadb.org/rest-api/mariadb/$line/latest/" |
+      jq -r '.releases | to_entries[0].value as $r | $r.files[]
+        | select(.file_name | test("linux-systemd-x86_64\\.tar\\.gz$"))
+        | "\($r.release_id) \(.file_download_url) \(.checksum.sha256sum)"' | head -1)
+    entry "$v" "$sha" "${url/http:/https:}"
+    ;;
+  redis)
+    v=$(gh_latest redis/redis "$line")
+    sha=$(curl -fsSL https://raw.githubusercontent.com/redis/redis-hashes/master/README |
+      awk -v f="redis-$v.tar.gz" '$2 == f && $3 == "sha256" {print $4}')
+    entry "$v" "$sha" "https://download.redis.io/releases/redis-$v.tar.gz"
+    ;;
+  valkey)
+    v=$(gh_latest valkey-io/valkey "$line")
+    url="https://download.valkey.io/releases/valkey-$v-noble-x86_64.tar.gz"
+    sha=$(curl -fsSL "$url.sha256" | cut -d' ' -f1)
+    entry "$v" "$sha" "$url"
+    ;;
+  mongodb)
+    read -r v url sha < <(curl -fsSL https://downloads.mongodb.org/full.json |
+      jq -r --arg line "$line." '[.versions[] | select(.production_release and (.version | startswith($line)))][0]
+        # Newest Ubuntu build the release has: 7.0 stops at 22.04.
+        | .version as $v | [.downloads[] | select(.arch == "x86_64" and .edition == "targeted" and (.target | test("^ubuntu2[24]04$")))]
+        | sort_by(.target) | last | "\($v) \(.archive.url) \(.archive.sha256)"')
+    entry "$v" "$sha" "$url"
+    ;;
+  esac
+}
+
+engines='{}'
+for e in "${ENGINES[@]}"; do
+  IFS='|' read -r id _title _port lines <<<"$e"
+  for line in $lines; do
+    echo "Resolving $id $line…" >&2
+    json=$(resolve "$id" "$line")
+    jq -e '.version != "" and (.sha256 | test("^[0-9a-f]{64}$")) and (.urls | length > 0)' <<<"$json" >/dev/null ||
+      { echo "incomplete entry for $id $line: $json" >&2; exit 1; }
+    engines=$(jq -c --arg e "$id" --arg l "$line" --argjson j "$json" '.[$e][$l] = $j' <<<"$engines")
+  done
+done
+
+echo "Resolving mongosh…" >&2
+v=$(gh_api repos/mongodb-js/mongosh/releases/latest | jq -r .tag_name | sed 's/^v//')
+asset="mongosh-$v-linux-x64.tgz"
+mongosh=$(entry "$v" "$(gh_digest mongodb-js/mongosh "v$v" "$asset")" "https://github.com/mongodb-js/mongosh/releases/download/v$v/$asset")
+
+echo "Resolving libxcrypt-compat…" >&2
+pkg=$(curl -fsSL https://archive.archlinux.org/packages/l/libxcrypt-compat/ |
+  grep -oE 'libxcrypt-compat-[0-9][^"]*-x86_64\.pkg\.tar\.zst' | sort -uV | tail -1)
+pv=${pkg#libxcrypt-compat-}
+url="https://archive.archlinux.org/packages/l/libxcrypt-compat/$pkg"
+libxcrypt=$(entry "${pv%-x86_64.pkg.tar.zst}" "$(hash_of "$url")" "$url")
+
+jq -n --arg generated "$(date -u +%Y-%m-%d)" --argjson engines "$engines" \
+  --argjson mongosh "$mongosh" --argjson libxcrypt "$libxcrypt" \
+  '{lockVersion: 1, generated: $generated, engines: $engines, extras: {mongosh: $mongosh, "libxcrypt-compat": $libxcrypt}}' >"$LOCK"
+echo "Wrote $LOCK" >&2

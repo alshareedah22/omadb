@@ -1,0 +1,156 @@
+{
+  "lockVersion": 1,
+  "generated": "2026-10-25",
+  "engines": {
+    "postgresql": {
+      "18": {
+        "version": "18.6.1",
+        "sha256": "e84b02dd8d0ce5879fb697330a789231c8b8f8d958dae3ad4d90fecc710b1315",
+        "urls": [
+          "https://github.com/theseus-rs/postgresql-binaries/releases/download/18.6.1/postgresql-18.6.1-x86_64-unknown-linux-gnu.tar.gz"
+        ]
+      },
+      "17": {
+        "version": "17.11.1",
+        "sha256": "aa8e2e97574bd789119ac01f1dddcd7a038c84e5c308d7b753018618258f0fbd",
+        "urls": [
+          "https://github.com/theseus-rs/postgresql-binaries/releases/download/17.11.1/postgresql-17.11.1-x86_64-unknown-linux-gnu.tar.gz"
+        ]
+      },
+      "16": {
+        "version": "16.15.1",
+        "sha256": "0c42e7c05f0cb596b82ac07990c96fc261ec2e8106055d557c76442d712dbf74",
+        "urls": [
+          "https://github.com/theseus-rs/postgresql-binaries/releases/download/16.15.1/postgresql-16.15.1-x86_64-unknown-linux-gnu.tar.gz"
+        ]
+      },
+      "15": {
+        "version": "15.19.1",
+        "sha256": "f34ebfdbff9029f47011709fe8ef68d4a65ea5caadfd065e68a1161e2a021565",
+        "urls": [
+          "https://github.com/theseus-rs/postgresql-binaries/releases/download/15.19.1/postgresql-15.19.1-x86_64-unknown-linux-gnu.tar.gz"
+        ]
+      },
+      "14": {
+        "version": "14.24.1",
+        "sha256": "79e7c2e7cf1c914e0b0d55bb83f13b10be959cf2e4608dac368a0e538f93fda5",
+        "urls": [
+          "https://github.com/theseus-rs/postgresql-binaries/releases/download/14.24.1/postgresql-14.24.1-x86_64-unknown-linux-gnu.tar.gz"
+        ]
+      }
+    },
+    "mysql": {
+      "9.7": {
+        "version": "9.7.4",
+        "sha256": "1b022d85e2901e85d6f4df5482a03b036b5b2cf55ad786c9a788f805c6687665",
+        "urls": [
+          "https://cdn.mysql.com/Downloads/MySQL-9.7/mysql-9.7.4-linux-glibc2.28-x86_64-minimal.tar.xz",
+          "https://downloads.mysql.com/archives/get/p/23/file/mysql-9.7.4-linux-glibc2.28-x86_64-minimal.tar.xz"
+        ]
+      },
+      "8.4": {
+        "version": "8.4.13",
+        "sha256": "5dfbb764f731df40ef9e4f5d69aed32bdac8ba1af20bd96b7d40a942d83d4ed2",
+        "urls": [
+          "https://cdn.mysql.com/Downloads/MySQL-8.4/mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz",
+          "https://downloads.mysql.com/archives/get/p/23/file/mysql-8.4.13-linux-glibc2.28-x86_64-minimal.tar.xz"
+        ]
+      },
+      "8.0": {
+        "version": "8.0.46",
+        "sha256": "e2777d490fcaadc5a4be06db89b6935c78909bd9c3382af859ab284af0c950b0",
+        "urls": [
+          "https://cdn.mysql.com/Downloads/MySQL-8.0/mysql-8.0.46-linux-glibc2.17-x86_64-minimal.tar.xz",
+          "https://downloads.mysql.com/archives/get/p/23/file/mysql-8.0.46-linux-glibc2.17-x86_64-minimal.tar.xz"
+        ]
+      }
+    },
+    "mariadb": {
+      "11.8": {
+        "version": "11.8.9",
+        "sha256": "32f8871a2aa38b36aa418b7f4abc6fc0c6ef1ba5a45798cacb2afa52c8a6113b",
+        "urls": [
+          "https://downloads.mariadb.org/rest-api/mariadb/11.8.9/mariadb-11.8.9-linux-systemd-x86_64.tar.gz"
+        ]
+      },
+      "11.4": {
+        "version": "11.4.13",
+        "sha256": "3cebf63914df3154b7cb6d548337eb2be42c773aeb641110446b72e2746cfed7",
+        "urls": [
+          "https://downloads.mariadb.org/rest-api/mariadb/11.4.13/mariadb-11.4.13-linux-systemd-x86_64.tar.gz"
+        ]
+      },
+      "10.11": {
+        "version": "10.11.19",
+        "sha256": "7efb257927f31f4422f496246b32590d0b7617f3d9dd900e575de761b302d919",
+        "urls": [
+          "https://downloads.mariadb.org/rest-api/mariadb/10.11.19/mariadb-10.11.19-linux-systemd-x86_64.tar.gz"
+        ]
+      }
+    },
+    "redis": {
+      "8": {
+        "version": "8.10.2",
+        "sha256": "b9ffee226b5eecdba98a679260dad764b2a4ebd90dce4ad5ac9e9f3eef9c02b3",
+        "urls": [
+          "https://download.redis.io/releases/redis-8.10.2.tar.gz"
+        ]
+      },
+      "7": {
+        "version": "7.4.11",
+        "sha256": "3c266ece0abd54ed3b1c912c6eb86b7508cf382cb690ee6649d3843f018f6357",
+        "urls": [
+          "https://download.redis.io/releases/redis-7.4.11.tar.gz"
+        ]
+      }
+    },
+    "valkey": {
+      "9": {
+        "version": "9.1.2",
+        "sha256": "0d2a79936cbafa5f527a5175536bb17bd3f767f95f53529e59dddfacf762eec0",
+        "urls": [
+          "https://download.valkey.io/releases/valkey-9.1.2-noble-x86_64.tar.gz"
+        ]
+      },
+      "8": {
+        "version": "8.1.10",
+        "sha256": "89f4293b3dd56bb326380136b2bf08933fa84e501e19f69a7e75534932076378",
+        "urls": [
+          "https://download.valkey.io/releases/valkey-8.1.10-noble-x86_64.tar.gz"
+        ]
+      }
+    },
+    "mongodb": {
+      "8": {
+        "version": "8.3.13",
+        "sha256": "a55780ed9bb5410ae5ea8e8c5b882cb1cd9389da689c417d6265929ad28a1f7f",
+        "urls": [
+          "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2404-8.3.13.tgz"
+        ]
+      },
+      "7": {
+        "version": "7.0.45",
+        "sha256": "c2eec1e4aaee967838430ac57fc7d46c22f566c718eda6033e32add80d506f8b",
+        "urls": [
+          "https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-7.0.45.tgz"
+        ]
+      }
+    }
+  },
+  "extras": {
+    "mongosh": {
+      "version": "2.14.0",
+      "sha256": "c1c5f1a9709e91c5eb1c6861a99c305c165fa564afb465fabfd2b2334c08a23c",
+      "urls": [
+        "https://github.com/mongodb-js/mongosh/releases/download/v2.14.0/mongosh-2.14.0-linux-x64.tgz"
+      ]
+    },
+    "libxcrypt-compat": {
+      "version": "4.5.2-1",
+      "sha256": "89476037bf6a96561b86b8b61a2b1d5c34ea2d07036bc9427abdf799d57e934c",
+      "urls": [
+        "https://archive.archlinux.org/packages/l/libxcrypt-compat/libxcrypt-compat-4.5.2-1-x86_64.pkg.tar.zst"
+      ]
+    }
+  }
+}

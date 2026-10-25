@@ -104,7 +104,7 @@ Panel {
   property bool newAutostart: false
   property string newMode: defaultMode
   function isInstalled(engine, line) {
-    return root.installed.some(function(i) { return i.engine === engine && (i.exact === line || i.exact.indexOf(line + ".") === 0) })
+    return root.installed.some(function(i) { return i.engine === engine && i.line === line })
   }
   readonly property var newEngineInfo: engineInfo(newEngine)
   readonly property string defaultName: {
@@ -414,7 +414,7 @@ Panel {
         wrapMode: Text.Wrap
         text: root.dockerStatus === "missing"
           ? "Docker is not installed. Install it with: omarchy install docker"
-          : "Docker is not running. Start it with: sudo systemctl enable --now docker"
+          : "Docker is not running. Start the docker service to use Docker mode, or pick Native engine."
         color: Color.urgent
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption

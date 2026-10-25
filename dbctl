@@ -25,6 +25,8 @@
 #   dbctl logs <name>               follow the server log in a terminal
 #   dbctl port <engine>             next free port for an engine
 #   dbctl install <engine> <version>  download a native engine without creating a server
+#
+# Native downloads are pinned and checksummed in engines.lock (see tools/update-engines-lock).
 
 set -euo pipefail
 
@@ -174,102 +176,71 @@ docker_status() {
   echo running
 }
 
-# ---- Native engines: resolve, download, install ----------------------------
+# ---- Native engines: pinned, verified, installed once ------------------------
+#
+# engines.lock (next to this script) pins the exact build, URL and SHA-256 of
+# every engine line, so a download is bound to the reviewed plugin commit.
+# Nothing unpinned is ever downloaded, and nothing is unpacked, built or run
+# before its checksum matches. Regenerate with tools/update-engines-lock.
 
-# Newest release tag in a GitHub repo matching a line, e.g. 8 -> 8.2.3
-github_latest() {
-  local repo=$1 line=$2
-  curl -fsSL "https://api.github.com/repos/$repo/releases?per_page=100" |
-    jq -r '.[] | select(.prerelease | not) | .tag_name' | sed 's/^v//' |
-    grep -E "^${line//./\\.}\.[0-9]+(\.[0-9]+)?$" | sort -V | tail -1
+LOCK="$(dirname "$(readlink -f "$0")")/engines.lock"
+
+# JSON {version, sha256, urls} for engines.<engine>.<line>, or extras.<name>
+pinned() {
+  [[ -f $LOCK ]] || fail "engines.lock is missing; reinstall the plugin"
+  local j
+  if [[ $1 == extras ]]; then
+    j=$(jq -c --arg n "$2" '.extras[$n] // empty' "$LOCK")
+  else
+    j=$(jq -c --arg e "$1" --arg l "$2" '.engines[$e][$l] // empty' "$LOCK")
+  fi
+  [[ -n $j ]] || fail "no pinned build for $1 $2 in engines.lock"
+  echo "$j"
 }
 
-# "<exact version> <download url>" for an engine line
-resolve() {
-  local engine=$1 line=$2 v url
-  case $engine in
-  postgresql)
-    v=$(github_latest theseus-rs/postgresql-binaries "$line")
-    url="https://github.com/theseus-rs/postgresql-binaries/releases/download/$v/postgresql-$v-x86_64-unknown-linux-gnu.tar.gz"
-    ;;
-  mysql)
-    v=$(git ls-remote --tags https://github.com/mysql/mysql-server.git 2>/dev/null |
-      grep -oE "refs/tags/mysql-${line//./\\.}\.[0-9]+$" | sed 's|refs/tags/mysql-||' | sort -V | tail -1)
-    url="https://cdn.mysql.com/Downloads/MySQL-$line/mysql-$v-linux-glibc2.28-x86_64-minimal.tar.xz"
-    # Superseded releases move from the CDN to the archive.
-    curl -fsIL -o /dev/null "$url" ||
-      url="https://downloads.mysql.com/archives/get/p/23/file/mysql-$v-linux-glibc2.28-x86_64-minimal.tar.xz"
-    ;;
-  mariadb)
-    read -r v url < <(curl -fsSL "https://downloads.mariadb.org/rest-api/mariadb/$line/latest/" |
-      jq -r '.releases | to_entries[0].value as $r | $r.files[]
-        | select(.os == "Linux" and .cpu == "x86_64" and (.file_name | test("linux-systemd-x86_64\\.tar\\.gz$")))
-        | "\($r.release_id) \(.file_download_url)"' | head -1)
-    url=${url/http:/https:}
-    ;;
-  redis)
-    v=$(github_latest redis/redis "$line")
-    url="https://download.redis.io/releases/redis-$v.tar.gz"
-    ;;
-  valkey)
-    v=$(github_latest valkey-io/valkey "$line")
-    url="https://download.valkey.io/releases/valkey-$v-noble-x86_64.tar.gz"
-    ;;
-  mongodb)
-    read -r v url < <(curl -fsSL https://downloads.mongodb.org/full.json |
-      jq -r --arg line "$line." '[.versions[] | select(.production_release and (.version | startswith($line)))][0]
-        | .version as $v | .downloads[] | select(.target == "ubuntu2404" and .arch == "x86_64" and .edition == "targeted")
-        | "\($v) \(.archive.url)"' | head -1)
-    ;;
-  esac
-  [[ -n ${v:-} && -n ${url:-} ]] || fail "could not find a $engine $line download (offline?)"
-  echo "$v $url"
+# fetch_verified <pinned json> <out>: try each URL, keep the file only if its SHA-256 matches.
+fetch_verified() {
+  local pin=$1 out=$2 sha url got
+  sha=$(jq -r .sha256 <<<"$pin")
+  [[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "engines.lock has no valid checksum for ${out##*/}"
+  while IFS= read -r url; do
+    curl -fL --retry 3 -o "$out" "$url" 2>/dev/null || continue
+    got=$(sha256sum "$out" | cut -d' ' -f1)
+    [[ $got == "$sha" ]] && return 0
+    rm -f "$out"
+    fail "checksum mismatch for $url (expected $sha, got $got); nothing was installed"
+  done < <(jq -r '.urls[]' <<<"$pin")
+  rm -f "$out"
+  fail "download failed: $(jq -r '.urls[0]' <<<"$pin")"
 }
 
-installed_exact() {
-  # newest installed exact version for a line
-  local d="$ENGINES_DIR/$1"
-  [[ -d $d ]] || return 0
-  find "$d" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | grep -E "^${2//./\\.}\." | grep -v '\.tmp$' | sort -V | tail -1
-}
-
-fetch() {
-  local url=$1 out=$2
-  curl -fL --retry 3 -o "$out" "$url" 2>/dev/null || fail "download failed: $url"
-}
-
-# Download (or build) an engine line once; prints the install directory.
+# Download (or build) the pinned build of an engine line once; prints the install directory.
 ensure_engine() {
-  local engine=$1 line=$2 exact
-  exact=$(installed_exact "$engine" "$line")
-  if [[ -n $exact ]]; then
-    add_compat "$ENGINES_DIR/$engine/$exact"
-    echo "$ENGINES_DIR/$engine/$exact"
+  local engine=$1 line=$2 pin v
+  pin=$(pinned "$engine" "$line")
+  v=$(jq -r .version <<<"$pin")
+  local dest="$ENGINES_DIR/$engine/$v"
+  if [[ -d $dest ]]; then
+    add_compat "$dest"
+    echo "$dest"
     return
   fi
 
   mkdir -p "$ENGINES_DIR/$engine" "$HOME_DIR/tmp"
   exec 9>"$HOME_DIR/tmp/$engine-$line.lock"
   flock 9
-  exact=$(installed_exact "$engine" "$line")
-  if [[ -n $exact ]]; then echo "$ENGINES_DIR/$engine/$exact"; return; fi
+  if [[ -d $dest ]]; then echo "$dest"; return; fi
 
-  local v url
-  read -r v url < <(resolve "$engine" "$line")
-  local dest="$ENGINES_DIR/$engine/$v" work="$ENGINES_DIR/$engine/$v.tmp"
+  local url work="$dest.tmp"
+  url=$(jq -r '.urls[0]' <<<"$pin")
   local archive="$HOME_DIR/tmp/${url##*/}"
+  echo "Downloading $(engine_field "$engine" title) $v…" >&2
+  fetch_verified "$pin" "$archive"
   rm -rf "$work"
   mkdir -p "$work"
-  echo "Downloading $(engine_field "$engine" title) $v…" >&2
 
-  if [[ $engine == valkey ]] && ! curl -fsIL -o /dev/null "$url"; then
-    url="https://github.com/valkey-io/valkey/archive/refs/tags/$v.tar.gz"
-    archive="$HOME_DIR/tmp/valkey-$v-src.tar.gz"
-  fi
-  fetch "$url" "$archive"
-
-  if [[ $engine == redis || $archive == *-src.tar.gz ]]; then
-    # Built from source: a minute or so, no extra dependencies.
+  if [[ $engine == redis ]]; then
+    # Redis publishes no Linux binaries: build the verified source release (a minute or so).
     local src="$HOME_DIR/tmp/$engine-$v-src"
     rm -rf "$src"
     mkdir -p "$src"
@@ -308,11 +279,11 @@ trim_engine() {
       else
         rm -f "$f.strip"
       fi
-    done < <(find "$1/bin" "$1/lib" -type f \( -perm -u+x -o -name '*.so*' \) ! -name '*.strip' -print0)
+    done < <(find "$1/bin" "$1/lib" -type f \( -perm -u+x -o -name '*.so*' \) ! -name '*.strip' -print0 2>/dev/null)
   fi
 }
 
-# Upstream builds link libncurses.so.6 / libtinfo.so.6; Arch ships the same
+# Upstream builds link libncurses/libtinfo .so.6 (or .so.5); Arch ships the same
 # library as libncursesw.so.6. Point the missing names at it, for this engine only.
 add_compat() {
   local missing lib
@@ -320,16 +291,15 @@ add_compat() {
     awk '/not found/ {print $1}' | sort -u)
   for lib in $missing; do
     case $lib in
-    libncurses.so.6 | libtinfo.so.6)
+    # MySQL 8.0's client wants the .so.5 names; it uses only the unversioned termcap calls.
+    libncurses.so.6 | libtinfo.so.6 | libncurses.so.5 | libtinfo.so.5)
       mkdir -p "$1/compat"
       ln -sf /usr/lib/libncursesw.so.6 "$1/compat/$lib"
       ;;
     libcrypt.so.1)
       # Arch's libxcrypt-compat package, unpacked next to this engine only.
-      local url pkg="$HOME_DIR/tmp/libxcrypt-compat.pkg.tar.zst" tmp="$HOME_DIR/tmp/libxcrypt-compat"
-      url=$(pacman -Sp libxcrypt-compat 2>/dev/null | tail -1)
-      [[ $url == http* ]] || continue
-      fetch "$url" "$pkg"
+      local pkg="$HOME_DIR/tmp/libxcrypt-compat.pkg.tar.zst" tmp="$HOME_DIR/tmp/libxcrypt-compat"
+      fetch_verified "$(pinned extras libxcrypt-compat)" "$pkg"
       rm -rf "$tmp"
       mkdir -p "$tmp" "$1/compat"
       tar --zstd -xf "$pkg" -C "$tmp" usr/lib
@@ -349,11 +319,8 @@ with_compat() {
 
 # MongoDB server builds no longer ship a shell; add mongosh next to mongod.
 ensure_mongosh() {
-  local v archive
-  v=$(curl -fsSL https://api.github.com/repos/mongodb-js/mongosh/releases/latest | jq -r .tag_name | sed 's/^v//')
-  [[ -n $v ]] || return 0
-  archive="$HOME_DIR/tmp/mongosh-$v.tgz"
-  fetch "https://downloads.mongodb.com/compass/mongosh-$v-linux-x64.tgz" "$archive"
+  local archive="$HOME_DIR/tmp/mongosh.tgz"
+  fetch_verified "$(pinned extras mongosh)" "$archive"
   tar -xzf "$archive" -C "$1/bin" --strip-components=2 --wildcards '*/bin/mongosh*'
   rm -f "$archive"
 }
@@ -478,7 +445,14 @@ create_native() {
     ;;
   esac
   [[ $autostart == on ]] && systemctl --user enable --quiet "$(unit "$name")"
-  return 0
+  # Created means ready: wait until the server accepts TCP connections.
+  local i
+  for i in $(seq 1 60); do
+    ss -ltnH "sport = :$port" | grep -q . && return 0
+    systemctl --user is-failed --quiet "$(unit "$name")" && fail "$name failed to start; see its logs"
+    sleep 1
+  done
+  fail "$name did not start listening on port $port"
 }
 
 create_docker() {
@@ -558,9 +532,12 @@ cmd_state() {
       '{id: $id, title: $title, port: $port, versions: ($versions | split(" "))}'
   done | jq -sc .)
 
-  if [[ -d $ENGINES_DIR ]]; then
-    installed=$(find "$ENGINES_DIR" -mindepth 2 -maxdepth 2 -type d ! -name '*.tmp' -printf '%P\n' |
-      jq -Rc 'split("/") | {engine: .[0], exact: .[1]}' | jq -sc .)
+  if [[ -d $ENGINES_DIR && -f $LOCK ]]; then
+    # Only the pinned builds count: an older download of a line is not what a new server gets.
+    installed=$(jq -c '[.engines | to_entries[] | .key as $e | .value | to_entries[] | {engine: $e, line: .key, exact: .value.version}]' "$LOCK" |
+      jq -c --arg dir "$ENGINES_DIR" '.[]' | while IFS= read -r i; do
+        [[ -d $ENGINES_DIR/$(jq -r '.engine + "/" + .exact' <<<"$i") ]] && echo "$i"
+      done | jq -sc .)
   fi
 
   if [[ $status == running ]]; then

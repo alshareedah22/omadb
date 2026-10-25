@@ -32,11 +32,20 @@ packages.
 | Engine     | Native build                                       |
 |------------|----------------------------------------------------|
 | PostgreSQL | [theseus-rs/postgresql-binaries](https://github.com/theseus-rs/postgresql-binaries) (relocatable upstream builds) |
-| MySQL      | Official `linux-glibc2.28-x86_64-minimal` tarball    |
+| MySQL      | Official `minimal` tarball (glibc 2.28; glibc 2.17 for 8.0) |
 | MariaDB    | Official `linux-systemd-x86_64` tarball              |
 | Redis      | Built from the official source release (about a minute) |
-| Valkey     | Official prebuilt release (built from source if missing) |
-| MongoDB    | Official `ubuntu2404` tarball, plus `mongosh`        |
+| Valkey     | Official prebuilt release                            |
+| MongoDB    | Official Ubuntu tarball (24.04; 22.04 for 7.0), plus `mongosh` |
+
+**Pinned and verified.** Every build is pinned in [`engines.lock`](engines.lock):
+exact version, download URL and SHA-256, taken from what each upstream publishes
+(GitHub release digests, MariaDB's API, MongoDB's `full.json`, `redis-hashes`,
+Valkey's `.sha256` files; MySQL publishes no SHA-256, so those are hashed when the
+lock is made). OmaDB never downloads anything that isn't in the lock, and nothing is
+unpacked, built or run unless its checksum matches; a mismatch stops the install and
+leaves nothing behind. New versions arrive with plugin updates; maintainers
+regenerate the lock with `tools/update-engines-lock` and review the diff.
 
 **Docker container** runs the official image as a container named `omadb-<name>`,
 labelled `omadb.managed=1`, with its data in the volume `omadb-<name>`.

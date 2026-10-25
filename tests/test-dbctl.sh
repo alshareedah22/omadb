@@ -132,6 +132,29 @@ refute "rejects actions on unknown servers" "$DBCTL" stop zt-nope
 check "state is valid JSON" bash -c "'$DBCTL' state | jq -e '.engines | length == 6'"
 refute "nothing was created by bad input" bash -c "'$DBCTL' state | jq -e '.services[] | select(.name == \"zt-x\")'"
 
+# ---- Pinned downloads -----------------------------------------------------------
+
+echo
+echo "Pinned downloads"
+check "every engine line is pinned with a SHA-256" bash -c "
+  for e in postgresql mysql mariadb redis valkey mongodb; do
+    for l in \$(sed -n '/^ENGINES=(/,/^)/p' '$DBCTL' | grep \"\\\"\$e|\" | cut -d'|' -f4 | tr -d '\"'); do
+      jq -e --arg e \$e --arg l \$l '.engines[\$e][\$l].sha256 | test(\"^[0-9a-f]{64}\$\")' '$here/engines.lock' >/dev/null || exit 1
+    done
+  done"
+check "extras are pinned" jq -e '.extras.mongosh.sha256 and .extras["libxcrypt-compat"].sha256' "$here/engines.lock"
+check "every pinned URL is reachable" bash -c "jq -r '.. | .urls? // empty | .[0]' '$here/engines.lock' | while read -r u; do curl -fsIL -o /dev/null --max-time 20 \"\$u\" || { echo \"\$u\"; exit 1; }; done"
+# A tampered checksum must stop the install before anything is unpacked.
+tamper=$(mktemp -d)
+cp "$DBCTL" "$tamper/dbctl"
+jq '.engines.valkey["8"].sha256 = ("0" * 64)' "$here/engines.lock" >"$tamper/engines.lock"
+# An empty OMADB_HOME, so the check runs even when valkey 8 is installed for real.
+export_home="$tamper/home"
+refute "a checksum mismatch refuses the install" env OMADB_HOME="$export_home" "$tamper/dbctl" install valkey 8
+check "and leaves nothing installed" bash -c "! ls -d '$export_home'/engines/valkey/* 2>/dev/null"
+check "the error says why" bash -c "OMADB_HOME='$export_home' '$tamper/dbctl' install valkey 8 2>&1 | grep -q 'checksum mismatch'"
+rm -rf "$tamper"
+
 # ---- Per engine, per mode ------------------------------------------------------
 
 run_mode() {
@@ -211,6 +234,17 @@ run_defaults() {
     docker volume rm "omadb-$n" >/dev/null 2>&1
   fi
 }
+
+echo
+echo "Every native engine line installs (OMADB_TEST_ALL_LINES=1)"
+# Opt-in: downloads every pinned build (several GB). OMADB_TEST_ALL_LINES=1 tests/test-dbctl.sh
+if [[ $MODES != docker && ${OMADB_TEST_ALL_LINES:-0} == 1 ]]; then
+  for e in postgresql mysql mariadb redis valkey mongodb; do
+    for l in $(sed -n '/^ENGINES=(/,/^)/p' "$DBCTL" | grep "\"$e|" | cut -d'|' -f4 | tr -d '"'); do
+      check "$e $l" "$DBCTL" install "$e" "$l"
+    done
+  done
+fi
 
 for engine in "${ENGINES[@]}"; do
   for mode in native docker; do
