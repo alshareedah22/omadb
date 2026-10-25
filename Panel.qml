@@ -42,6 +42,7 @@ Panel {
   property string errorText: ""
   property string armedDelete: ""
   property string copiedName: ""
+  property string shownCreds: ""
 
   function refresh() {
     if (stateProc.running) { refreshTimer.restart(); return }
@@ -114,6 +115,8 @@ Panel {
     for (let i = 2; ; i++) if (!taken[base + "-" + i]) return base + "-" + i
   }
 
+  readonly property string defaultUser: ({ postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default" })[newEngine] || ""
+
   function pickEngine(id) {
     root.newEngine = id
     const info = engineInfo(id)
@@ -127,9 +130,14 @@ Panel {
     const name = nameField.text.trim() || root.defaultName
     const port = portField.text.trim() || root.suggestedPort
     if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(name)) { root.errorText = "Name: lowercase letters, digits and dashes."; return }
-    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode])
+    const user = userField.text.trim()
+    const pass = passField.text
+    if (root.newEngine === "mongodb" && user !== "" && pass === "") { root.errorText = "MongoDB needs a password when you set a username."; return }
+    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode, user, pass])
     nameField.text = ""
     portField.text = ""
+    userField.text = ""
+    passField.text = ""
     root.suggestedPort = ""
   }
 
@@ -446,6 +454,7 @@ Panel {
 
             Column {
               id: rowText
+              readonly property bool showCreds: root.shownCreds === row.modelData.name
               anchors.left: dot.right
               anchors.leftMargin: Style.space(10)
               anchors.right: rowActions.left
@@ -477,6 +486,18 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                visible: rowText.showCreds
+                wrapMode: Text.WrapAnywhere
+                text: "User: " + (row.modelData.user || "none (no auth)")
+                  + "    Password: " + (row.modelData.password || "none")
+                color: Color.accent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
             }
 
             Row {
@@ -485,6 +506,14 @@ Panel {
               anchors.rightMargin: Style.space(8)
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(12)
+
+              IconAction {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "󰌆"
+                color: rowText.showCreds ? Color.accent : Qt.darker(root.fg, 1.5)
+                tip: rowText.showCreds ? "Hide username and password" : "Show username and password"
+                onActivated: root.shownCreds = rowText.showCreds ? "" : row.modelData.name
+              }
 
               IconAction {
                 anchors.verticalCenter: parent.verticalCenter
@@ -629,6 +658,43 @@ Panel {
         }
       }
 
+      Row {
+        width: parent.width
+        spacing: Style.space(8)
+
+        Column {
+          width: (parent.width - parent.spacing) / 2
+          spacing: Style.space(4)
+          Label { text: "Username" }
+          TextField {
+            id: userField
+            width: parent.width
+            foreground: root.fg
+            placeholderText: root.defaultUser || "none (no auth)"
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.createService(); event.accepted = true }
+              else if (event.key === Qt.Key_Escape) { root.close(); event.accepted = true }
+            }
+          }
+        }
+
+        Column {
+          width: (parent.width - parent.spacing) / 2
+          spacing: Style.space(4)
+          Label { text: "Password" }
+          TextField {
+            id: passField
+            width: parent.width
+            foreground: root.fg
+            placeholderText: "none"
+            Keys.onPressed: function(event) {
+              if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { root.createService(); event.accepted = true }
+              else if (event.key === Qt.Key_Escape) { root.close(); event.accepted = true }
+            }
+          }
+        }
+      }
+
       Item {
         width: parent.width
         implicitHeight: createChip.height
@@ -657,7 +723,9 @@ Panel {
         wrapMode: Text.Wrap
         text: {
           const e = root.newEngine
-          const user = e === "postgresql" ? "User postgres, no password. " : (e === "mysql" || e === "mariadb") ? "User root, no password. " : "No password. "
+          const u = userField.text.trim() || root.defaultUser
+          const user = (u ? "User " + u : "No user") + (passField.text ? ", with password" : ", no password")
+            + ((e === "mysql" || e === "mariadb") && passField.text && u !== "root" ? " (root gets the same password)" : "") + ". "
           if (root.newMode === "docker") return user + "Runs in a Docker container; data is kept in a Docker volume until you delete the server."
           return user + "Runs the engine itself: 󰇚 versions are downloaded once to ~/.local/share/omadb, data stays there until you delete the server."
         }

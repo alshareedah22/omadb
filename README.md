@@ -6,10 +6,10 @@ A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 
 - **Create** a server: choose how it runs (**native engine** or **Docker
   container**), an engine (PostgreSQL, MySQL, MariaDB, Redis, Valkey, MongoDB),
-  a version, a name and a port. A free port is suggested
+  a version, a name, a port, and the **username and password** to use. A free port is suggested
   automatically, so several versions of the same engine run side by side.
 - **Start / stop** it with the switch
-- **Copy** its connection URL (󰆏), open its **CLI client** in a terminal (),
+- **See** its username and password (󰌆), **copy** its connection URL with them (󰆏), open its **CLI client** in a terminal (),
   follow its **logs** (󰦪)
 - Make it **start with the system** (󰐥)
 - **Delete** it and its data (󰆴, click twice)
@@ -45,16 +45,23 @@ labelled `omadb.managed=1`, with its data in the volume `omadb-<name>`.
 Either way, servers listen on `127.0.0.1` only, stop and start keep the data,
 and only Delete removes it. Servers OmaDB did not create are never touched.
 
-| Engine     | Default port | User / password    | Client     |
-|------------|--------------|--------------------|------------|
-| PostgreSQL | 5432         | `postgres`, none   | `psql`     |
-| MySQL      | 3306         | `root`, none       | `mysql`    |
-| MariaDB    | 3306         | `root`, none       | `mariadb`  |
-| Redis      | 6379         | none               | `redis-cli`|
-| Valkey     | 6379         | none               | `valkey-cli`|
-| MongoDB    | 27017        | none               | `mongosh`  |
+## Username and password
 
-These are development servers: passwordless and reachable from this machine only.
+Leave them empty for the usual passwordless development defaults, or set your own:
+
+| Engine          | Default user         | What a username / password does |
+|-----------------|----------------------|---------------------------------|
+| PostgreSQL      | `postgres`           | That user is the superuser; a password turns on `scram-sha-256` auth |
+| MySQL / MariaDB | `root`               | Another name creates that user with all privileges; a password is also set on `root` |
+| Redis / Valkey  | `default`            | A password sets `requirepass`; another name creates an ACL user with full access and turns `default` off |
+| MongoDB         | none (no auth)       | Creates a `root` user in `admin` and turns on auth; needs a password |
+
+Passwords can use any characters except spaces, quotes, backslashes and `$`.
+The 󰌆 button shows them, the copied URL includes them (URL-encoded), and the CLI
+client logs in with them. They are kept with the server (`server.json`, mode 600, for
+native; container labels for Docker), so this is for local development, not secrets.
+
+Servers listen on `127.0.0.1` only.
 
 ## Requirements
 
@@ -83,7 +90,7 @@ omarchy plugin enable blackcode.omadb --section right
 
 ```bash
 dbctl state                                  # JSON: docker status, engines, servers
-dbctl create postgresql 17 app-db 5433 on native   # or docker; empty port = next free one
+dbctl create postgresql 17 app-db 5433 on native app s3cret   # or docker; empty port = next free one
 dbctl install mysql 8.4                      # download a native engine ahead of time
 dbctl start|stop|restart app-db
 dbctl url app-db                             # postgresql://postgres@127.0.0.1:5433/postgres
