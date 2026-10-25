@@ -299,7 +299,16 @@ trim_engine() {
   rm -rf "$1"/mariadb-test "$1"/mysql-test "$1"/sql-bench "$1"/bin/mongos "$1"/bin/install_compass \
     "$1"/bin/mariadb-test* "$1"/bin/mysql-test* "$1"/lib/*.a
   if command -v strip >/dev/null; then
-    find "$1/bin" "$1/lib" -type f \( -perm -u+x -o -name '*.so*' \) -exec strip --strip-debug {} + 2>/dev/null || true
+    # Strip into a new file and rename it over the original: strip rewrites in place,
+    # which SIGBUSes any running server that has the old file mapped.
+    local f
+    while IFS= read -r -d '' f; do
+      if strip --strip-debug -o "$f.strip" "$f" 2>/dev/null; then
+        chmod --reference="$f" "$f.strip" && mv -f "$f.strip" "$f"
+      else
+        rm -f "$f.strip"
+      fi
+    done < <(find "$1/bin" "$1/lib" -type f \( -perm -u+x -o -name '*.so*' \) ! -name '*.strip' -print0)
   fi
 }
 
