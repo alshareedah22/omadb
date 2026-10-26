@@ -113,7 +113,7 @@ Or from a local copy:
 
 ```bash
 mkdir -p ~/.config/omarchy/plugins/blackcode.omadbngin
-cp manifest.json Panel.qml dbctl engines.lock icon.svg LICENSE ~/.config/omarchy/plugins/blackcode.omadbngin/
+cp manifest.json Panel.qml DbState.qml qmldir dbctl engines.lock icon.svg LICENSE ~/.config/omarchy/plugins/blackcode.omadbngin/
 omarchy plugin enable blackcode.omadbngin --section right
 ```
 

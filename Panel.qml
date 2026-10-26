@@ -88,10 +88,27 @@ Panel {
     run(name, "Restoring", ["restore", name, path])
   }
 
-  function refresh() {
-    if (stateProc.running) { refreshTimer.restart(); return }
-    stateProc.running = true
+  function refresh() { DbState.refreshSoon() }
+
+  // The shared state (DbState) changed: take it, unless the port field is being typed in,
+  // since a new list rebuilds the rows and would take its focus (and draft) mid-typing.
+  function applyState() {
+    const s = DbState.snapshot
+    if (!s) return
+    root.omatable = !!s.omatable
+    root.dockerStatus = s.docker || "missing"
+    root.engines = s.engines || []
+    if (!root.portFocus) root.services = s.services || []
+    root.installed = s.installed || []
+    root.stateLoaded = true
   }
+  Connections {
+    target: DbState
+    function onSnapshotChanged() { root.applyState() }
+  }
+  onPortFocusChanged: if (!portFocus) applyState()
+  Component.onCompleted: { DbState.users += 1; applyState() }
+  Component.onDestruction: { DbState.users -= 1; if (opened) DbState.viewers -= 1 }
 
   function run(name, label, args) {
     root.errorText = ""
@@ -190,12 +207,10 @@ Panel {
     root.suggestedPort = ""
   }
 
-  Component.onCompleted: refresh()
-
   onOpenedChanged: {
     root.portFocus = false
+    DbState.viewers += opened ? 1 : -1
     if (opened) {
-      refresh()
       root.errorText = ""
       root.armedDelete = ""
       if (root.newVersion === "" && root.engines.length > 0) pickEngine(root.newEngine)
@@ -204,20 +219,6 @@ Panel {
   }
 
   onEnginesChanged: if (root.newVersion === "" && root.engines.length > 0) pickEngine(root.newEngine)
-
-  Timer {
-    id: refreshTimer
-    interval: 250
-    onTriggered: root.refresh()
-  }
-
-  // Health checks and image pulls do not always emit events; poll gently.
-  Timer {
-    interval: root.opened ? 3000 : 30000
-    running: true
-    repeat: true
-    onTriggered: root.refresh()
-  }
 
   Timer {
     id: armTimer
@@ -229,25 +230,6 @@ Panel {
     id: copiedTimer
     interval: 1500
     onTriggered: root.copiedName = ""
-  }
-
-  Process {
-    id: stateProc
-    command: [root.ctl, "state"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        let s
-        try { s = JSON.parse(text) } catch (e) { return }
-        root.omatable = !!s.omatable
-        root.dockerStatus = s.docker || "missing"
-        root.engines = s.engines || []
-        // a new list rebuilds the rows, which would take the port field's focus (and draft) mid-typing
-        if (!root.portFocus) root.services = s.services || []
-        root.installed = s.installed || []
-        root.stateLoaded = true
-      }
-    }
   }
 
   Process {
@@ -284,37 +266,6 @@ Panel {
       waitForEnd: true
       onStreamFinished: root.suggestedPort = text.trim()
     }
-  }
-
-  // Live updates: Docker reports every start, stop and removal of our containers.
-  Process {
-    id: eventsProc
-    running: root.dockerUp
-    command: ["docker", "events", "--filter", "label=omadbngin.managed=1", "--filter", "type=container", "--format", "{{.Action}}"]
-    stdout: SplitParser { onRead: function(line) { refreshTimer.restart() } }
-    onExited: eventsRestart.restart()
-  }
-
-  // Native servers: systemd logs every start and stop of an omadbngin-* unit.
-  Process {
-    id: nativeEventsProc
-    running: true
-    command: ["journalctl", "--user", "-f", "-n", "0", "-o", "cat", "-u", "omadbngin-*.service"]
-    // Only systemd's own lines ("Started OmaDBngin …", "omadbngin-x.service: Failed …"), not server logs.
-    stdout: SplitParser { onRead: function(line) { if (/OmaDBngin|omadbngin-[^ ]*\.service/.test(String(line))) refreshTimer.restart() } }
-    onExited: nativeEventsRestart.restart()
-  }
-
-  Timer {
-    id: nativeEventsRestart
-    interval: 5000
-    onTriggered: nativeEventsProc.running = true
-  }
-
-  Timer {
-    id: eventsRestart
-    interval: 5000
-    onTriggered: if (root.dockerUp) eventsProc.running = true
   }
 
   // ---- Small building blocks ----
