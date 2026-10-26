@@ -110,9 +110,9 @@ Panel {
   Component.onCompleted: { DbState.users += 1; applyState() }
   Component.onDestruction: { DbState.users -= 1; if (opened) DbState.viewers -= 1 }
 
-  function run(name, label, args) {
+  function run(name, label, args, env) {
     root.errorText = ""
-    root.queue = root.queue.concat([{ name: name, label: label, command: [root.ctl].concat(args) }])
+    root.queue = root.queue.concat([{ name: name, label: label, command: [root.ctl].concat(args), env: env || ({}) }])
     if (!actionProc.running) runNext()
   }
 
@@ -125,6 +125,7 @@ Panel {
     root.busyDetail = ""
     root.stderrLines = []
     actionProc.command = job.command
+    actionProc.environment = job.env
     actionProc.running = true
   }
 
@@ -194,7 +195,9 @@ Panel {
     const user = userField.text.trim()
     const pass = passField.text
     if (root.newEngine === "mongodb" && user !== "" && pass === "") { root.errorText = "MongoDB needs a password when you set a username."; return }
-    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode, user, pass])
+    // the password goes in the environment: arguments are visible to every local account
+    run(name, "Creating", ["create", root.newEngine, root.newVersion, name, port, root.newAutostart ? "on" : "off", root.newMode, user],
+        { OMADBNGIN_PASSWORD: pass })
   }
 
   // The form is cleared only once the server exists, so a failed create keeps what you typed.

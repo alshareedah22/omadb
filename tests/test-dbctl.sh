@@ -62,15 +62,12 @@ connect() {
   case $engine in
   postgresql) PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -tAc 'select 1' | grep -qx 1 ;;
   mysql | mariadb)
-    local a=(-u"$user")
-    [[ -n $pass ]] && a+=(-p"$pass")
-    with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" "${a[@]}" -NBe 'select 1' 2>/dev/null | grep -qx 1
+    MYSQL_PWD=$pass with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -NBe 'select 1' 2>/dev/null | grep -qx 1
     ;;
   redis | valkey)
     local a=()
     [[ -n $user && $user != default ]] && a+=(--user "$user")
-    [[ -n $pass ]] && a+=(--pass "$pass")
-    "$(engine_bin "$engine" "$engine-cli")" -p "$port" "${a[@]}" --no-auth-warning ping 2>&1 | grep -qx PONG
+    REDISCLI_AUTH=$pass "$(engine_bin "$engine" "$engine-cli")" -p "$port" "${a[@]}" --no-auth-warning ping 2>&1 | grep -qx PONG
     ;;
   mongodb)
     local auth=""
@@ -91,15 +88,14 @@ data() {
     PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -tAc "$sql" | grep -qx 42
     ;;
   mysql | mariadb)
-    local sql="select x from omadb.t" a=(-u"$user")
-    [[ -n $pass ]] && a+=(-p"$pass")
+    local sql="select x from omadb.t"
     [[ $op == write ]] && sql="create database omadb; create table omadb.t(x int); insert into omadb.t values (42); $sql"
-    with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" "${a[@]}" -NBe "$sql" 2>/dev/null | grep -qx 42
+    MYSQL_PWD=$pass with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -NBe "$sql" 2>/dev/null | grep -qx 42
     ;;
   redis | valkey)
     local a=()
     [[ -n $user && $user != default ]] && a+=(--user "$user")
-    [[ -n $pass ]] && a+=(--pass "$pass")
+    export REDISCLI_AUTH=$pass
     [[ $op == write ]] && "$(engine_bin "$engine" "$engine-cli")" -p "$port" "${a[@]}" --no-auth-warning set omadb 42 >/dev/null
     "$(engine_bin "$engine" "$engine-cli")" -p "$port" "${a[@]}" --no-auth-warning get omadb | grep -qx 42
     ;;
@@ -117,8 +113,8 @@ forget() {
   local engine=$1 port=$2 user=$3 pass=$4
   case $engine in
   postgresql) PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -qc 'drop table omadb_t' ;;
-  mysql | mariadb) with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -p"$pass" -e 'drop database omadb' 2>/dev/null ;;
-  redis | valkey) "$(engine_bin "$engine" "$engine-cli")" -p "$port" --user "$user" --pass "$pass" --no-auth-warning del omadb | grep -qx 1 ;;
+  mysql | mariadb) MYSQL_PWD=$pass with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -e 'drop database omadb' 2>/dev/null ;;
+  redis | valkey) REDISCLI_AUTH=$pass "$(engine_bin "$engine" "$engine-cli")" -p "$port" --user "$user" --no-auth-warning del omadb | grep -qx 1 ;;
   esac
 }
 
@@ -173,7 +169,7 @@ run_mode() {
   local mode=$1 engine=$2 version=${LINE[$2]} n="zt-$2-$1" user=app
   echo
   echo "$engine ($mode)"
-  if ! "$DBCTL" create "$engine" "$version" "$n" "" off "$mode" "$user" "$PASS" 2>/tmp/omadbngin-test-err; then
+  if ! OMADBNGIN_PASSWORD=$PASS "$DBCTL" create "$engine" "$version" "$n" "" off "$mode" "$user" 2>/tmp/omadbngin-test-err; then
     bad "$engine $mode: create ($(tail -1 /tmp/omadbngin-test-err))"
     return
   fi
@@ -181,7 +177,8 @@ run_mode() {
   local port
   port=$(field "$n" port)
   check "state lists it as $mode, running" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | \"\(.mode) \(.state)\"') == '$mode running' ]]"
-  check "state shows the username and password" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | \"\(.user) \(.password)\"') == '$user $PASS' ]]"
+  export EXPECT="$user $PASS" # in the environment: a command line would show it to everyone
+  check "state shows the username and password" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | \"\(.user) \(.password)\"') == \"\$EXPECT\" ]]"
   check "connects with the right password" eventually connect "$engine" "$port" "$user" "$PASS"
   refute "refuses a wrong password" connect "$engine" "$port" "$user" "wrong"
   refute "refuses no password" connect "$engine" "$port" "$user" ""
@@ -237,14 +234,18 @@ run_mode() {
   check "state says no autostart" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | .autostart') == false ]]"
 
   check "client command opens" env PATH="$SHIM:$PATH" "$DBCTL" client "$n"
-  local cmd
-  cmd=$(sed 's/^sleep 0.5; //; s/docker exec -it/docker exec -i/' "$SHIM/launched")
+  local cmd launcher
+  launcher=$(cat "$SHIM/launched")
+  cmd="bash $launcher"
+  refute "the terminal's command line has no password" grep -qF -- "$PASS" "$SHIM/launched-argv"
+  check "the client launcher is private" bash -c "[[ \$(stat -c %a '$launcher') == 600 && \$(stat -c %a '$(dirname "$launcher")') == 700 ]]"
   case $engine in
   postgresql) check "client logs in" bash -c "$cmd -tAc 'select current_user' | grep -qx $user" ;;
   mysql | mariadb) check "client logs in" bash -c "$cmd -NBe 'select current_user()' 2>/dev/null | grep -q '^$user@'" ;;
   redis | valkey) check "client logs in" bash -c "$cmd ping | grep -qx PONG" ;;
-  mongodb) check "client logs in" bash -c "$cmd --eval 'db.runCommand({connectionStatus: 1}).authInfo.authenticatedUsers[0].user' | grep -qx $user" ;;
+  mongodb) check "client logs in" bash -c "$cmd --eval 'db.runCommand({connectionStatus: 1}).authInfo.authenticatedUsers[0].user' </dev/null | grep -qx $user" ;;
   esac
+  refute "the launcher deletes itself" test -e "$launcher"
   check "logs command opens" env PATH="$SHIM:$PATH" "$DBCTL" logs "$n"
   check "logs command shows output" bash -c "eval \"timeout 5 \$(sed 's/ -f / /' '$SHIM/launched-argv')\" | grep -q ."
 
@@ -288,6 +289,14 @@ if [[ $MODES != docker && ${OMADBNGIN_TEST_ALL_LINES:-0} == 1 ]]; then
   done
 fi
 
+# Every command line on the machine, sampled all through the engine tests: the test password
+# must never show up in one (other local accounts can read them with ps).
+leaks=$(mktemp)
+pattern=$(mktemp)
+printf '%s\n' "$PASS" >"$pattern"
+(while :; do ps -eo args=; sleep 0.05; done | grep --line-buffered -F -f "$pattern" >>"$leaks") &
+sampler=$!
+
 for engine in "${ENGINES[@]}"; do
   for mode in native docker; do
     [[ $MODES == all || $MODES == "$mode" ]] || continue
@@ -299,6 +308,14 @@ for engine in "${ENGINES[@]}"; do
     run_defaults "$mode" "$engine"
   done
 done
+
+pkill -P "$sampler" 2>/dev/null
+kill "$sampler" 2>/dev/null
+echo
+echo "Passwords"
+check "no command line ever carried the password" test ! -s "$leaks"
+[[ -s $leaks ]] && sort -u "$leaks" | cut -c1-200 | sed 's/^/    /'
+rm -f "$leaks" "$pattern"
 
 echo
 echo "Ports"

@@ -16,6 +16,7 @@
 #
 #   dbctl state                     JSON: docker status, engines, servers
 #   dbctl create <engine> <version> <name> <port> <autostart:on|off> [native|docker] [user] [password]
+#                                   (the password is better given in OMADBNGIN_PASSWORD)
 #   dbctl start|stop|restart <name>
 #   dbctl remove <name> [--keep-data]
 #   dbctl autostart <name> on|off
@@ -132,7 +133,12 @@ default_user() {
   esac
 }
 
-uri() { jq -rn --arg s "$1" '$s | @uri'; }
+# Passwords never go on a command line, where every local account can read them (ps,
+# /proc/<pid>/cmdline): they travel in the environment, on stdin or in private files.
+uri() { printf '%s' "$1" | jq -sRr @uri; }
+
+# A private scratch directory (mode 700) on a short path, so sockets fit in it too.
+private_tmp() { mktemp -d "${XDG_RUNTIME_DIR:-/tmp}/omadbngin.XXXXXX"; }
 
 # Single quotes can never reach SQL: passwords are checked in cmd_create.
 mysql_setup_sql() {
@@ -160,18 +166,21 @@ mysql_apply() {
     sleep 1
   done
   local out
-  out=$("$@" -e "$sql" 2>&1) || fail "setting the user and password failed: $(tail -1 <<<"$out")"
+  out=$("$@" <<<"$sql" 2>&1) || fail "setting the user and password failed: $(tail -1 <<<"$out")"
 }
 
-redis_auth_args() {
+# The auth part of a Redis/Valkey config file (native: the server's .conf; Docker: a file in
+# the volume), never command-line flags.
+redis_auth_conf() {
   local user=$1 pass=$2
   if [[ $user == default ]]; then
-    [[ -n $pass ]] && printf '%s\n' --requirepass "$pass"
+    [[ -n $pass ]] && printf 'requirepass "%s"\n' "$pass"
   else
     local secret=nopass
     [[ -n $pass ]] && secret=">$pass"
-    printf '%s\n' --user default off --user "$user" on "$secret" '~*' '&*' '+@all'
+    printf 'user default off\nuser %s on %s ~* &* +@all\n' "$user" "$secret"
   fi
+  return 0
 }
 
 docker_status() {
@@ -400,6 +409,57 @@ EOF
   systemctl --user daemon-reload
 }
 
+# Run SQL as passwordless root on a server started with networking off, then stop it.
+provision_mysql() {
+  local engine=$1 base=$2 dir=$3 user=$4 pass=$5 tmp daemon=mysqld client=mysql extra=(--mysqlx=OFF) pid
+  [[ $engine == mariadb ]] && { daemon=mariadbd; client=mariadb; extra=(); }
+  tmp=$(private_tmp)
+  if [[ -d $base/compat ]]; then export LD_LIBRARY_PATH=$base/compat; fi
+  "$base/bin/$daemon" --no-defaults --basedir="$base" --datadir="$dir/data" --skip-networking \
+    --socket="$tmp/s" --pid-file="$tmp/pid" "${extra[@]}" >"$tmp/log" 2>&1 &
+  pid=$!
+  mysql_apply "$(mysql_setup_sql "$user" "$pass")" "$base/bin/$client" --socket="$tmp/s" -uroot
+  MYSQL_PWD=$pass "$base/bin/$client" --socket="$tmp/s" -uroot -e SHUTDOWN >/dev/null 2>&1 || kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  rm -rf "$tmp"
+}
+
+# Create the MongoDB user on a server that has auth on from the start and listens only on a
+# private socket: the localhost exception lets that first user in, and only us.
+provision_mongodb() {
+  local base=$1 dir=$2 port=$3 user=$4 pass=$5 tmp sock pid i
+  tmp=$(private_tmp)
+  sock="$tmp/mongodb-$port.sock"
+  if [[ -d $base/compat ]]; then export LD_LIBRARY_PATH=$base/compat; fi
+  "$base/bin/mongod" --dbpath "$dir/data" --port "$port" --auth --bind_ip "$sock" --unixSocketPrefix "$tmp" \
+    --filePermissions 0700 >"$tmp/log" 2>&1 &
+  pid=$!
+  local url out="" ok=""
+  url="mongodb://$(uri "$sock")/admin"
+  export OMADBNGIN_USER OMADBNGIN_PW=$pass
+  OMADBNGIN_USER=$(jq -nc --arg u "$user" '{user: $u, roles: [{role: "root", db: "admin"}]}')
+  # A busy machine can take a while to bring mongod up: keep trying while it runs.
+  for i in $(seq 1 120); do
+    kill -0 "$pid" 2>/dev/null || break
+    if [[ -S $sock ]] && out=$("$base/bin/mongosh" --quiet "$url" \
+      --eval 'db.createUser(Object.assign(JSON.parse(process.env.OMADBNGIN_USER), {pwd: process.env.OMADBNGIN_PW}))' 2>&1); then
+      ok=1
+      break
+    fi
+    sleep 1
+  done
+  unset OMADBNGIN_PW
+  if [[ -z $ok ]]; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    out=${out:-$(grep -o '"msg":"[^"]*"' "$tmp/log" | tail -1)}
+    rm -rf "$tmp"
+    fail "creating the MongoDB user failed: $(tail -1 <<<"$out")"
+  fi
+  kill "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  rm -rf "$tmp"
+}
+
 create_native() {
   local engine=$1 version=$2 name=$3 port=$4 autostart=$5 user=$6 pass=$7
   local base exact dir
@@ -416,47 +476,25 @@ create_native() {
   if [[ $engine == redis || $engine == valkey ]]; then
     {
       printf 'port %s\nbind 127.0.0.1\ndir %s\nappendonly yes\ndaemonize no\nprotected-mode no\n' "$port" "$dir/data"
-      local args=()
-      mapfile -t args < <(redis_auth_args "$user" "$pass")
-      if ((${#args[@]})); then
-        [[ ${args[0]} == --requirepass ]] && printf 'requirepass "%s"\n' "${args[1]}"
-        [[ ${args[0]} == --user ]] && printf 'user default off\nuser %s on %s ~* &* +@all\n' "$user" "${args[6]}"
-      fi
+      redis_auth_conf "$user" "$pass"
     } >"$dir/$engine.conf"
+    chmod 600 "$dir/$engine.conf"
   fi
-  jq -n --arg name "$name" --arg engine "$engine" --arg version "$version" --arg exact "$exact" \
-    --argjson port "$port" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg user "$user" --arg password "$pass" \
+  (umask 077 && OMADBNGIN_PW=$pass jq -n --arg name "$name" --arg engine "$engine" --arg version "$version" --arg exact "$exact" \
+    --argjson port "$port" --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg user "$user" \
     '{name: $name, engine: $engine, version: $version, exact: $exact, port: $port, created: $created, mode: "native",
-      user: $user, password: $password}' >"$dir/server.json"
+      user: $user, password: env.OMADBNGIN_PW}' >"$dir/server.json")
   chmod 600 "$dir/server.json"
 
-  # MongoDB: the first start runs without --auth to create the user.
-  write_unit "$name" "$engine" "$exact" "$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$port")")"
-  systemctl --user start "$(unit "$name")"
-
+  # Users are set up before the server ever listens on TCP, on a socket only we can reach:
+  # nobody else can slip in while root has no password or MongoDB has no user yet.
+  local auth=""
   case $engine in
-  mysql | mariadb)
-    local client=mysql
-    [[ $engine == mariadb ]] && client=mariadb
-    [[ $user == root && -z $pass ]] ||
-      mysql_apply "$(mysql_setup_sql "$user" "$pass")" \
-        env LD_LIBRARY_PATH="$base/compat" "$base/bin/$client" -h127.0.0.1 -P"$port" -uroot
-    ;;
-  mongodb)
-    if [[ -n $user ]]; then
-      local i js
-      for i in $(seq 1 60); do
-        "$base/bin/mongosh" --quiet "mongodb://127.0.0.1:$port" --eval 'db.runCommand({ping: 1})' >/dev/null 2>&1 && break
-        sleep 1
-      done
-      js=$(jq -nc --arg u "$user" --arg p "$pass" '{user: $u, pwd: $p, roles: [{role: "root", db: "admin"}]}')
-      "$base/bin/mongosh" --quiet "mongodb://127.0.0.1:$port/admin" --eval "db.createUser($js)" >/dev/null ||
-        fail "creating the MongoDB user failed"
-      write_unit "$name" "$engine" "$exact" "$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$port" auth)")"
-      systemctl --user restart "$(unit "$name")"
-    fi
-    ;;
+  mysql | mariadb) [[ $user == root && -z $pass ]] || provision_mysql "$engine" "$base" "$dir" "$user" "$pass" ;;
+  mongodb) [[ -z $user ]] || { provision_mongodb "$base" "$dir" "$port" "$user" "$pass"; auth=auth; } ;;
   esac
+  write_unit "$name" "$engine" "$exact" "$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$port" $auth)")"
+  systemctl --user start "$(unit "$name")"
   [[ $autostart == on ]] && systemctl --user enable --quiet "$(unit "$name")"
   # Created means ready: wait until the server accepts TCP connections.
   local i
@@ -480,26 +518,30 @@ create_docker() {
     if ((${version%%.*} >= 18)); then data=/var/lib/postgresql; else data=/var/lib/postgresql/data; fi
     env=(-e "POSTGRES_USER=$user")
     if [[ -n $pass ]]; then env+=(-e "POSTGRES_PASSWORD=$pass"); else env+=(-e POSTGRES_HOST_AUTH_METHOD=trust); fi
+    # (env goes to docker in a private --env-file, not on its command line: see docker_run)
     ;;
   mysql)
     image="mysql:$version"
     inner=3306
     data=/var/lib/mysql
-    env=(-e MYSQL_ALLOW_EMPTY_PASSWORD=yes -e MYSQL_ROOT_HOST=%)
+    # root gets its password while the image initializes (with networking off), so it is
+    # never reachable without one
+    env=(-e MYSQL_ROOT_HOST=%)
+    if [[ -n $pass ]]; then env+=(-e "MYSQL_ROOT_PASSWORD=$pass"); else env+=(-e MYSQL_ALLOW_EMPTY_PASSWORD=yes); fi
     ;;
   mariadb)
     image="mariadb:$version"
     inner=3306
     data=/var/lib/mysql
-    env=(-e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1)
+    if [[ -n $pass ]]; then env=(-e "MARIADB_ROOT_PASSWORD=$pass"); else env=(-e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1); fi
     ;;
   redis | valkey)
     image="redis:$version"
     [[ $engine == valkey ]] && image="valkey/valkey:$version"
     inner=6379
     data=/data
-    mapfile -t cmd < <(redis_auth_args "$user" "$pass")
-    cmd=("$engine-server" --appendonly yes "${cmd[@]}")
+    redis_volume_conf "$name" "$image" "$user" "$pass"
+    cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
     ;;
   mongodb)
     image="mongo:$version"
@@ -514,8 +556,21 @@ create_docker() {
 
   if [[ $engine == mysql || $engine == mariadb ]] && ! [[ $user == root && -z $pass ]]; then
     echo "Setting up user $user…" >&2
-    mysql_apply "$(mysql_setup_sql "$user" "$pass")" docker exec -i "$(container "$name")" "$engine" -h127.0.0.1 -uroot
+    MYSQL_PWD=$pass mysql_apply "$(mysql_setup_sql "$user" "$pass")" \
+      docker exec -i -e MYSQL_PWD "$(container "$name")" "$engine" -h127.0.0.1 -uroot
   fi
+}
+
+# Docker Redis/Valkey: the auth settings live in /data/omadbngin.conf on the server's volume
+# (written through stdin), so they are not in the container's command line, which every
+# local account sees in ps.
+redis_volume_conf() {
+  local name=$1 image=$2 user=$3 pass=$4
+  docker volume create "$(container "$name")" >/dev/null
+  redis_auth_conf "$user" "$pass" |
+    docker run --rm -i -v "$(container "$name"):/data" --entrypoint sh "$image" -c \
+      'cat >/data/omadbngin.conf && chmod 600 /data/omadbngin.conf && chown "$(stat -c %u:%g /data)" /data/omadbngin.conf' ||
+    fail "writing the server's settings failed"
 }
 
 # The managed container itself; env and cmd follow as: <env count> <env…> <cmd…>.
@@ -526,6 +581,14 @@ docker_run() {
   local restart=no
   [[ $autostart == on ]] && restart=unless-stopped
 
+  # The password label and the environment (passwords for the image's first start) go in
+  # private files, not on docker's command line.
+  local tmp i
+  tmp=$(private_tmp)
+  printf 'omadbngin.password=%s\n' "$pass" >"$tmp/labels"
+  : >"$tmp/env"
+  for ((i = 0; i < ${#env[@]}; i++)); do [[ ${env[i]} == -e ]] || printf '%s\n' "${env[i]}" >>"$tmp/env"; done
+
   docker run -d --quiet \
     --name "$(container "$name")" \
     --label "$LABEL" \
@@ -534,12 +597,15 @@ docker_run() {
     --label "omadbngin.version=$version" \
     --label "omadbngin.port=$port" \
     --label "omadbngin.user=$user" \
-    --label "omadbngin.password=$pass" \
+    --label-file "$tmp/labels" \
+    --env-file "$tmp/env" \
     --restart "$restart" \
     -p "127.0.0.1:$port:$inner" \
     -v "$(container "$name"):$data" \
-    "${env[@]}" \
     "$image" "${cmd[@]}" >/dev/null
+  local rc=$?
+  rm -rf "$tmp"
+  return $rc
 }
 
 # ---- Moving from OmaDB --------------------------------------------------------
@@ -618,6 +684,10 @@ migrate_docker() {
     while IFS= read -r e; do [[ -n $e ]] && env+=(-e "$e"); done < <(
       docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$old" | grep -E '^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_')
     docker rm "$old" >/dev/null
+    if [[ $engine == redis || $engine == valkey ]]; then
+      redis_volume_conf "$name" "$image" "$user" "$pass"
+      cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
+    fi
     docker_run "$name" "$engine" "$version" "$port" "$autostart" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" \
       "${env[@]}" "${cmd[@]}"
     [[ $running == true ]] || docker stop "$(container "$name")" >/dev/null
@@ -724,10 +794,10 @@ cmd_state() {
     done | jq -sc .)
   fi
 
-  jq -nc --arg docker "$status" --argjson engines "$engines" --argjson installed "$installed" \
-    --argjson a "$docker_services" --argjson b "$native_services" \
+  # the server lists carry passwords: they reach jq on stdin, not as arguments
+  printf '%s\n%s\n' "$docker_services" "$native_services" | jq -sc --arg docker "$status" --argjson engines "$engines" --argjson installed "$installed" \
     --argjson omatable "$([[ -d $HOME/.config/omarchy/plugins/blackcode.omatable ]] && echo true || echo false)" \
-    'def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
+    '.[0] as $a | .[1] as $b | def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
      {docker: $docker, engines: $engines, installed: $installed, omatable: $omatable,
       services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // ""))
         | sort_by(.created | sub("\\.[0-9]+"; "") | sub("Z$"; "+00:00")
@@ -736,7 +806,8 @@ cmd_state() {
 }
 
 cmd_create() {
-  local engine=${1:-} version=${2:-} name=${3:-} port=${4:-} autostart=${5:-off} mode=${6:-docker} user=${7:-} pass=${8:-}
+  # the password: better from OMADBNGIN_PASSWORD than as an argument, which other accounts can see
+  local engine=${1:-} version=${2:-} name=${3:-} port=${4:-} autostart=${5:-off} mode=${6:-docker} user=${7:-} pass=${8:-${OMADBNGIN_PASSWORD:-}}
   [[ -n $engine && -n $version && -n $name ]] || fail "usage: create <engine> <version> <name> <port> <on|off> [native|docker]"
   [[ $name =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "name: lowercase letters, digits and dashes"
   [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
@@ -839,43 +910,55 @@ cmd_url() {
 
 cmd_client() {
   require_managed "${1:-}"
-  local engine port args=()
+  local engine port url
   engine=$(field_of "$1" engine)
   port=$(field_of "$1" port)
   creds_of "$1"
-  local mysql_auth=(-u"$USER_") redis_auth=()
-  [[ -n $PASS_ ]] && mysql_auth+=(-p"$PASS_")
-  [[ $USER_ != default ]] && redis_auth+=(--user "$USER_")
-  [[ -n $PASS_ ]] && redis_auth+=(--pass "$PASS_" --no-auth-warning)
-
+  url=$(cmd_url "$1")
+  # The terminal runs a launcher script in a private directory that deletes itself on start:
+  # the password is exported there, never part of a command line.
+  local dir script
+  dir="$HOME_DIR/run"
+  mkdir -p "$dir"
+  chmod 700 "$dir"
+  script=$(mktemp "$dir/client-$1.XXXXXX")
+  local redis_user=""
+  [[ $USER_ != default ]] && redis_user="--user $(printf '%q' "$USER_")"
+  {
+    echo 'rm -f -- "$0"'
+    printf 'export PGPASSWORD=%q MYSQL_PWD=%q REDISCLI_AUTH=%q OMADBNGIN_URL=%q\n' "$PASS_" "$PASS_" "$PASS_" "$url"
+    [[ -n $PASS_ ]] || echo 'unset MYSQL_PWD REDISCLI_AUTH'
+    echo 'sleep 0.5' # a moment for a just-started server
+    if [[ $MODE == native ]]; then
+      local base
+      base="$ENGINES_DIR/$engine/$(field_of "$1" exact)"
+      [[ -d $base/compat ]] && printf 'export LD_LIBRARY_PATH=%q\n' "$base/compat"
+      case $engine in
+      postgresql) printf 'exec %q -h 127.0.0.1 -p %q -U %q -d postgres "$@"\n' "$base/bin/psql" "$port" "$USER_" ;;
+      mysql | mariadb) printf 'exec %q -h127.0.0.1 -P%q -u%q "$@"\n' "$base/bin/$engine" "$port" "$USER_" ;;
+      redis | valkey) printf 'exec %q -p %q %s --no-auth-warning "$@"\n' "$base/bin/$engine-cli" "$port" "$redis_user" ;;
+      mongodb) printf 'exec %q --nodb --quiet --eval %q --shell "$@"\n' "$base/bin/mongosh" 'db = connect(process.env.OMADBNGIN_URL)' ;;
+      esac
+    else
+      local c inner_url
+      c=$(container "$1")
+      inner_url=${url/127.0.0.1:$port/127.0.0.1:27017}
+      printf 'export OMADBNGIN_URL=%q\n' "$inner_url"
+      echo 't=-i; [ -t 0 ] && t=-it'
+      case $engine in
+      postgresql) printf 'exec docker exec $t -e PGPASSWORD %q psql -U %q -d postgres "$@"\n' "$c" "$USER_" ;;
+      mysql | mariadb) printf 'exec docker exec $t ${MYSQL_PWD+-e MYSQL_PWD} %q %q -u%q "$@"\n' "$c" "$engine" "$USER_" ;;
+      redis | valkey) printf 'exec docker exec $t ${REDISCLI_AUTH+-e REDISCLI_AUTH} %q %q %s --no-auth-warning "$@"\n' "$c" "$engine-cli" "$redis_user" ;;
+      mongodb) printf 'exec docker exec $t -e OMADBNGIN_URL %q mongosh --nodb --quiet --eval %q --shell "$@"\n' "$c" 'db = connect(process.env.OMADBNGIN_URL)' ;;
+      esac
+    fi
+  } >"$script"
   if [[ $MODE == native ]]; then
-    local base
-    base="$ENGINES_DIR/$engine/$(field_of "$1" exact)"
-    [[ -d $base/compat ]] && args=(env LD_LIBRARY_PATH="$base/compat")
-    case $engine in
-    postgresql) args+=(env PGPASSWORD="$PASS_" "$base/bin/psql" -h 127.0.0.1 -p "$port" -U "$USER_" -d postgres) ;;
-    mysql) args+=("$base/bin/mysql" -h127.0.0.1 -P"$port" "${mysql_auth[@]}") ;;
-    mariadb) args+=("$base/bin/mariadb" -h127.0.0.1 -P"$port" "${mysql_auth[@]}") ;;
-    redis | valkey) args+=("$base/bin/$engine-cli" -p "$port" "${redis_auth[@]}") ;;
-    mongodb) args+=("$base/bin/mongosh" --quiet "$(cmd_url "$1")") ;;
-    esac
     systemctl --user is-active --quiet "$(unit "$1")" || systemctl --user start "$(unit "$1")"
   else
-    local c
-    c=$(container "$1")
-    case $engine in
-    postgresql) args=(docker exec -it -e PGPASSWORD="$PASS_" "$c" psql -U "$USER_" -d postgres) ;;
-    mysql | mariadb) args=(docker exec -it "$c" "$engine" "${mysql_auth[@]}") ;;
-    redis | valkey) args=(docker exec -it "$c" "$engine-cli" "${redis_auth[@]}") ;;
-    mongodb)
-      args=(docker exec -it "$c" mongosh --quiet)
-      [[ -n $USER_ ]] && args+=(-u "$USER_" -p "$PASS_" --authenticationDatabase admin)
-      ;;
-    esac
-    [[ $(docker inspect -f '{{.State.Running}}' "$c") == true ]] || docker start "$c" >/dev/null
+    [[ $(docker inspect -f '{{.State.Running}}' "$(container "$1")") == true ]] || docker start "$(container "$1")" >/dev/null
   fi
-  # %q keeps passwords with shell characters intact; a moment for a just-started server.
-  omarchy launch tui --app-id="omadbngin-$1" bash -c "sleep 0.5; $(printf '%q ' "${args[@]}")"
+  omarchy launch tui --app-id="omadbngin-$1" bash "$script"
 }
 
 cmd_logs() {
@@ -915,15 +998,15 @@ cmd_backup() {
     postgresql) PGPASSWORD="$PASS_" "$base/bin/pg_dumpall" -h 127.0.0.1 -p "$port" -U "$USER_" --no-password -f "$tmp" ;;
     mysql) MYSQL_PWD="$PASS_" "$base/bin/mysqldump" -h127.0.0.1 -P"$port" -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
     mariadb) MYSQL_PWD="$PASS_" "$base/bin/mariadb-dump" -h127.0.0.1 -P"$port" -u"$USER_" --skip-ssl --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
-    redis | valkey) "$base/bin/$engine-cli" -p "$port" ${PASS_:+--user "$USER_" --pass "$PASS_" --no-auth-warning} --rdb "$tmp" >/dev/null 2>&1 ;;
+    redis | valkey) REDISCLI_AUTH=$PASS_ "$base/bin/$engine-cli" -p "$port" ${PASS_:+--user "$USER_"} --no-auth-warning --rdb "$tmp" >/dev/null 2>&1 ;;
     esac
   else
     case $engine in
-    postgresql) docker exec -e PGPASSWORD="$PASS_" "$c" pg_dumpall -U "$USER_" >"$tmp" ;;
-    mysql) docker exec -e MYSQL_PWD="$PASS_" "$c" mysqldump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
-    mariadb) docker exec -e MYSQL_PWD="$PASS_" "$c" mariadb-dump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    postgresql) PGPASSWORD=$PASS_ docker exec -e PGPASSWORD "$c" pg_dumpall -U "$USER_" >"$tmp" ;;
+    mysql) MYSQL_PWD=$PASS_ docker exec -e MYSQL_PWD "$c" mysqldump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    mariadb) MYSQL_PWD=$PASS_ docker exec -e MYSQL_PWD "$c" mariadb-dump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
     redis | valkey)
-      docker exec "$c" "$engine-cli" ${PASS_:+--user "$USER_" --pass "$PASS_" --no-auth-warning} --rdb /tmp/omadbngin-backup.rdb >/dev/null 2>&1 &&
+      REDISCLI_AUTH=$PASS_ docker exec -e REDISCLI_AUTH "$c" "$engine-cli" ${PASS_:+--user "$USER_"} --no-auth-warning --rdb /tmp/omadbngin-backup.rdb >/dev/null 2>&1 &&
         docker cp "$c:/tmp/omadbngin-backup.rdb" "$tmp" >/dev/null && docker exec "$c" rm -f /tmp/omadbngin-backup.rdb ;;
     esac
   fi || { rm -f "$tmp"; fail "backup of $name failed"; }
@@ -955,7 +1038,7 @@ cmd_restore() {
       local conf cli aof=""
       conf=$(server_dir "$name")/$engine.conf
       cli=("$(engine_base "$name")/bin/$engine-cli" -p "$port")
-      [[ -n $PASS_ ]] && cli+=(--user "$USER_" --pass "$PASS_" --no-auth-warning)
+      [[ -n $PASS_ ]] && { cli+=(--user "$USER_" --no-auth-warning); export REDISCLI_AUTH=$PASS_; }
       grep -q '^appendonly yes' "$conf" && aof=1
       rm -rf "$dir/appendonlydir" "$dir"/appendonly*.aof
       [[ -n $aof ]] && sed -i 's/^appendonly yes/appendonly no/' "$conf"
@@ -1001,8 +1084,8 @@ cmd_restore() {
     esac
   else
     case $engine in
-    postgresql) docker exec -i -e PGPASSWORD="$PASS_" "$c" psql -X -q -U "$USER_" -d postgres <"$file" 2>&1 >/dev/null | grep -v 'already exists' >&2; return "${PIPESTATUS[0]}" ;;
-    mysql | mariadb) docker exec -i -e MYSQL_PWD="$PASS_" "$c" "$engine" -u"$USER_" <"$file" ;;
+    postgresql) PGPASSWORD=$PASS_ docker exec -i -e PGPASSWORD "$c" psql -X -q -U "$USER_" -d postgres <"$file" 2>&1 >/dev/null | grep -v 'already exists' >&2; return "${PIPESTATUS[0]}" ;;
+    mysql | mariadb) MYSQL_PWD=$PASS_ docker exec -i -e MYSQL_PWD "$c" "$engine" -u"$USER_" <"$file" ;;
     esac
   fi || fail "restore into $name failed"
 }
@@ -1055,6 +1138,11 @@ cmd_set_port() {
     user=$(field_of "$name" user)
     pass=$(field_of "$name" password)
     docker rm -f "$c" >/dev/null
+    # older Redis/Valkey containers had their password in the command line: move it to the volume
+    if [[ $engine == redis || $engine == valkey ]]; then
+      redis_volume_conf "$name" "$image" "$user" "$pass"
+      cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
+    fi
     docker_run "$name" "$engine" "$(field_of_label_version "$info")" "$new" "$auto" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" "${env[@]}" "${cmd[@]}"
     [[ $running == true ]] || docker stop "$c" >/dev/null
   fi
@@ -1084,5 +1172,5 @@ install)
   [[ " $(engine_field "${2:-}" versions) " == *" ${3:-} "* ]] || fail "usage: install <engine> <version>"
   ensure_engine "$2" "$3"
   ;;
-*) sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+*) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

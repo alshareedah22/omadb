@@ -81,6 +81,14 @@ The 󰌆 button shows them, the copied URL includes them (URL-encoded), and the 
 client logs in with them. They are kept with the server (`server.json`, mode 600, for
 native; container labels for Docker), so this is for local development, not secrets.
 
+Other local accounts never see them: dbctl hands passwords to the engines' tools through
+the environment, stdin or mode-600 files, never on a command line (where `ps` shows them
+to everyone), and the test suite watches every command line on the machine to make sure.
+Users are set up before a server listens on TCP: MySQL/MariaDB with networking off, and
+MongoDB with auth on from the start, on a private socket, so nobody can slip in first.
+From a script, give `dbctl create` the password in `OMADBNGIN_PASSWORD` rather than as an
+argument.
+
 Servers listen on `127.0.0.1` only.
 
 ## Requirements
