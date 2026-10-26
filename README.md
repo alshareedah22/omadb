@@ -1,6 +1,6 @@
 # OmaDBngin: local database servers for Omarchy
 
-![OmaDBngin panel open from the bar](preview.png)
+![OmaDBngin: local database servers, one click away in the Omarchy bar](preview.png)
 
 A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 
