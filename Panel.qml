@@ -48,7 +48,7 @@ Panel {
   property string armedRestore: ""
   property string portDraft: ""       // kept here: a state refresh rebuilds the rows
   property bool portFocus: false
-  property bool omatable: false       // OmaTable is installed: offer Open in OmaTable
+  property bool omatable: false       // OmaTablePlus is installed: offer Open in OmaTablePlus
 
   function human(n) {
     return n >= 1073741824 ? (n / 1073741824).toFixed(1) + " GB" : n >= 1048576 ? Math.round(n / 1048576) + " MB"
@@ -65,9 +65,9 @@ Panel {
     if (s.running && s.memory) parts.push(human(s.memory) + " RAM")
     return parts.join("  ·  ")
   }
-  function openInOmaTable(name) {
+  function openInOmaTablePlus(name) {
     root.close()
-    Quickshell.execDetached(["omarchy-shell", "shell", "summon", "blackcode.omatable", JSON.stringify({ connect: "omadb:" + name })])
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon", "blackcode.omatableplus", JSON.stringify({ connect: "omadb:" + name })])
   }
   function toggleTools(name) {
     root.armedRestore = ""
@@ -592,8 +592,8 @@ Panel {
                 Row {
                   spacing: Style.space(8)
                   Chip {
-                    label: row.modelData.engine === "mongodb" ? "Back up in OmaTable" : "󰁯  Back up to ~/Downloads"
-                    onPicked: row.modelData.engine === "mongodb" ? root.openInOmaTable(row.modelData.name)
+                    label: row.modelData.engine === "mongodb" ? "Back up in OmaTablePlus" : "󰁯  Back up to ~/Downloads"
+                    onPicked: row.modelData.engine === "mongodb" ? root.openInOmaTablePlus(row.modelData.name)
                       : root.run(row.modelData.name, "Backing up", ["backup", row.modelData.name])
                   }
                   TextField {
@@ -660,8 +660,8 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 visible: root.omatable
                 text: "\uf0ce"
-                tip: "Open in OmaTable"
-                onActivated: root.openInOmaTable(row.modelData.name)
+                tip: "Open in OmaTablePlus"
+                onActivated: root.openInOmaTablePlus(row.modelData.name)
               }
 
               IconAction {

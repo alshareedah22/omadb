@@ -185,12 +185,12 @@ redis_auth_conf() {
 
 docker_status() {
   command -v docker >/dev/null || { echo missing; return; }
-  # A ping on the socket takes a few ms; `docker info` ~60 ms, and the panel asks often.
-  # Anything else (no socket, another context, no curl) gets the full check.
+  # `docker info` takes ~60 ms and the panel asks often: the system daemon with a socket we
+  # may use is a few ms to check. Anything else (rootless, another context) gets the full check.
   local sock=${DOCKER_HOST:-unix:///var/run/docker.sock}
   sock=${sock#unix://}
-  if [[ -S $sock ]] && command -v curl >/dev/null &&
-    curl -sf --max-time 2 --unix-socket "$sock" http://docker/_ping >/dev/null 2>&1; then
+  if [[ -S $sock && -w $sock ]] &&
+    { systemctl is-active --quiet docker.service || systemctl is-active --quiet docker.socket; }; then
     echo running
     return
   fi
@@ -796,7 +796,7 @@ cmd_state() {
 
   # the server lists carry passwords: they reach jq on stdin, not as arguments
   printf '%s\n%s\n' "$docker_services" "$native_services" | jq -sc --arg docker "$status" --argjson engines "$engines" --argjson installed "$installed" \
-    --argjson omatable "$([[ -d $HOME/.config/omarchy/plugins/blackcode.omatable ]] && echo true || echo false)" \
+    --argjson omatable "$([[ -d $HOME/.config/omarchy/plugins/blackcode.omatableplus ]] && echo true || echo false)" \
     '.[0] as $a | .[1] as $b | def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
      {docker: $docker, engines: $engines, installed: $installed, omatable: $omatable,
       services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // ""))
@@ -981,7 +981,7 @@ cmd_backup() {
   engine=$(field_of "$name" engine)
   port=$(field_of "$name" port)
   creds_of "$name"
-  [[ $engine == mongodb ]] && fail "MongoDB backups: open the server in OmaTable and use Database ▾ → Back up"
+  [[ $engine == mongodb ]] && fail "MongoDB backups: open the server in OmaTablePlus and use Database ▾ → Back up"
   ext=sql
   [[ $engine == redis || $engine == valkey ]] && ext=rdb
   [[ -n $file ]] || file="$HOME/Downloads/$name-$(date +%Y%m%d-%H%M%S).$ext"
@@ -1026,7 +1026,7 @@ cmd_restore() {
   creds_of "$name"
   c=$(container "$name")
   case $engine in
-  mongodb) fail "MongoDB restores: open the server in OmaTable and use Database ▾ → Restore" ;;
+  mongodb) fail "MongoDB restores: open the server in OmaTablePlus and use Database ▾ → Restore" ;;
   redis | valkey)
     [[ $(head -c 5 "$file") == REDIS ]] || fail "$file is not an RDB snapshot"
     if [[ $MODE == native ]]; then
@@ -1123,34 +1123,57 @@ cmd_set_port() {
     [[ $running == active || $running == failed ]] && systemctl --user restart "$(unit "$name")"
     return 0
   else
-    # a container's ports are fixed: make it again on the same volume
-    local c info
-    c=$(container "$name")
-    info=$(docker inspect "$c")
-    image=$(jq -r '.[0].Config.Image' <<<"$info")
-    inner=$(jq -r '.[0].HostConfig.PortBindings | keys[0] | split("/")[0]' <<<"$info")
-    data=$(jq -r --arg v "$c" '.[0].Mounts[] | select(.Name == $v) | .Destination' <<<"$info")
-    mapfile -t env < <(jq -r '.[0].Config.Env[] | select(test("^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_")) | "-e", .' <<<"$info")
-    mapfile -t cmd < <(jq -r '.[0].Config.Cmd // [] | .[]' <<<"$info")
-    running=$(jq -r '.[0].State.Running' <<<"$info")
-    local auto=off user pass
-    [[ $(jq -r '.[0].HostConfig.RestartPolicy.Name' <<<"$info") == unless-stopped ]] && auto=on
-    user=$(field_of "$name" user)
-    pass=$(field_of "$name" password)
-    docker rm -f "$c" >/dev/null
-    # older Redis/Valkey containers had their password in the command line: move it to the volume
-    if [[ $engine == redis || $engine == valkey ]]; then
-      redis_volume_conf "$name" "$image" "$user" "$pass"
-      cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
-    fi
-    docker_run "$name" "$engine" "$(field_of_label_version "$info")" "$new" "$auto" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" "${env[@]}" "${cmd[@]}"
-    [[ $running == true ]] || docker stop "$c" >/dev/null
+    docker_recreate "$name" "$new"
   fi
 }
+
+# Make a managed container again on the same volume (ports are fixed at creation), keeping
+# its settings and running state. Redis/Valkey get their auth from the volume's config file.
+docker_recreate() {
+  local name=$1 new=$2 engine image inner data env cmd running c info
+  engine=$(field_of "$name" engine)
+  c=$(container "$name")
+  info=$(docker inspect "$c")
+  image=$(jq -r '.[0].Config.Image' <<<"$info")
+  inner=$(jq -r '.[0].HostConfig.PortBindings | keys[0] | split("/")[0]' <<<"$info")
+  data=$(jq -r --arg v "$c" '.[0].Mounts[] | select(.Name == $v) | .Destination' <<<"$info")
+  mapfile -t env < <(jq -r '.[0].Config.Env[] | select(test("^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_")) | "-e", .' <<<"$info")
+  mapfile -t cmd < <(jq -r '.[0].Config.Cmd // [] | .[]' <<<"$info")
+  running=$(jq -r '.[0].State.Running' <<<"$info")
+  local auto=off user pass
+  [[ $(jq -r '.[0].HostConfig.RestartPolicy.Name' <<<"$info") == unless-stopped ]] && auto=on
+  user=$(field_of "$name" user)
+  pass=$(field_of "$name" password)
+  docker rm -f "$c" >/dev/null
+  if [[ $engine == redis || $engine == valkey ]]; then
+    redis_volume_conf "$name" "$image" "$user" "$pass"
+    cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
+  fi
+  docker_run "$name" "$engine" "$(field_of_label_version "$info")" "$new" "$auto" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" "${env[@]}" "${cmd[@]}"
+  [[ $running == true ]] || docker stop "$c" >/dev/null
+}
+
+# Redis/Valkey containers made before 1.5.1 have their password in the container command line,
+# which every local account sees when it runs: make each of them again once, the same as a
+# port change does. The marker is written only after a full pass with Docker up.
+upgrade_redis_cmdline() {
+  local marker="$HOME_DIR/.redis-cmdline-upgraded" n MODE=docker
+  [[ -e $marker ]] && return 0
+  [[ $(docker_status) == running ]] || return 0
+  for n in $(docker ps -a --filter "label=$LABEL" --format '{{.Label "omadbngin.engine"}} {{.Label "omadbngin.name"}}' |
+    awk '$1 == "redis" || $1 == "valkey" { print $2 }'); do
+    if docker inspect -f '{{json .Config.Cmd}}' "$(container "$n")" | grep -qE '"--(requirepass|user)"'; then
+      echo "Moving the password of $n out of its container's command line…" >&2
+      docker_recreate "$n" "$(field_of "$n" port)" || return 0
+    fi
+  done
+  mkdir -p "$HOME_DIR" && : >"$marker"
+}
+
 field_of_label_version() { jq -r '.[0].Config.Labels["omadbngin.version"]' <<<"$1"; }
 
 case "${1:-}" in
-state | create | start | stop | restart | remove | autostart | url | copy | client | logs | port | install | backup | restore | set-port) migrate_legacy ;;
+state | create | start | stop | restart | remove | autostart | url | copy | client | logs | port | install | backup | restore | set-port) migrate_legacy; upgrade_redis_cmdline ;;
 esac
 
 case "${1:-}" in

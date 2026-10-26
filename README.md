@@ -12,14 +12,14 @@ A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 - **See** its username and password (󰌆), **copy** its connection URL with them (󰆏), open its **CLI client** in a terminal (),
   follow its **logs** (󰦪)
 - Make it **start with the system** (󰐥)
-- **Open** it in [OmaTable](https://github.com/alshareedah22/omatable) (, when OmaTable is installed)
+- **Open** it in [OmaTablePlus](https://github.com/alshareedah22/omatableplus) (, when OmaTablePlus is installed)
 - **Delete** it and its data (󰆴, click twice)
 
 Each running server shows its uptime, memory and data size; a failed one shows the
 last error from its log. The  button opens its tools:
 
 - **Back up** every database to `~/Downloads/<name>-<date>.sql` (Redis/Valkey: an
-  `.rdb` snapshot). MongoDB backups are made in OmaTable (*Database ▾ → Back up*).
+  `.rdb` snapshot). MongoDB backups are made in OmaTablePlus (*Database ▾ → Back up*).
 - **Restore** one of the listed backups (click twice). SQL dumps run against the server;
   an RDB snapshot replaces the Redis/Valkey data.
 - **Move to port**: the server gets a new port and restarts if it was running (Docker

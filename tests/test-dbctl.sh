@@ -199,7 +199,7 @@ run_mode() {
   check "data survives restart" eventually data read "$engine" "$port" "$user" "$PASS"
 
   if [[ $engine == mongodb ]]; then
-    refute "backup points MongoDB to OmaTable" "$DBCTL" backup "$n"
+    refute "backup points MongoDB to OmaTablePlus" "$DBCTL" backup "$n"
   else
     local bk
     bk=$(mktemp -d)
@@ -315,7 +315,30 @@ echo
 echo "Passwords"
 check "no command line ever carried the password" test ! -s "$leaks"
 [[ -s $leaks ]] && sort -u "$leaks" | cut -c1-200 | sed 's/^/    /'
-rm -f "$leaks" "$pattern"
+rm -f "$leaks"
+
+echo
+echo "Upgrade from a Redis container with its password in the command line"
+# 1.5.0 and older put Redis/Valkey passwords in the container's command line; the first dbctl
+# run after the update makes such containers again. The old dbctl comes from git history.
+if [[ $MODES != native ]] && docker info >/dev/null 2>&1 && git -C "$here" cat-file -e eab5fe8:dbctl 2>/dev/null; then
+  old=$(mktemp -d)
+  git -C "$here" show eab5fe8:dbctl >"$old/dbctl"
+  git -C "$here" show eab5fe8:engines.lock >"$old/engines.lock"
+  chmod +x "$old/dbctl"
+  upgrade_home=$(mktemp -d)
+  OMADBNGIN_HOME=$upgrade_home "$old/dbctl" create redis 7 zt-upgrade "" off docker app "$PASS" >/dev/null 2>&1
+  export REDISCLI_AUTH=$PASS
+  eventually docker exec -e REDISCLI_AUTH omadbngin-zt-upgrade redis-cli --user app --no-auth-warning set omadb 42
+  check "the old container has the password in its command line" bash -c "docker inspect -f '{{json .Config.Cmd}}' omadbngin-zt-upgrade | grep -qF -f '$pattern'"
+  check "a dbctl run upgrades it" env OMADBNGIN_HOME="$upgrade_home" "$DBCTL" state
+  refute "its command line no longer has the password" bash -c "docker inspect -f '{{json .Config.Cmd}}' omadbngin-zt-upgrade | grep -qF -f '$pattern'"
+  check "the data is still there, behind the password" eventually bash -c "docker exec -e REDISCLI_AUTH omadbngin-zt-upgrade redis-cli --user app --no-auth-warning get omadb | grep -qx 42"
+  check "it still refuses no password" bash -c "docker exec omadbngin-zt-upgrade redis-cli ping 2>&1 | grep -q NOAUTH"
+  check "the upgrade runs once" test -e "$upgrade_home/.redis-cmdline-upgraded"
+  OMADBNGIN_HOME=$upgrade_home "$DBCTL" remove zt-upgrade >/dev/null 2>&1
+  rm -rf "$old" "$upgrade_home"
+fi
 
 echo
 echo "Ports"
@@ -337,6 +360,7 @@ if [[ $MODES == all ]] && docker info >/dev/null 2>&1; then
   check "native and Docker servers list oldest first" bash -c "[[ \$('$DBCTL' state | jq -c '[.services[].name | select(startswith(\"zt-order\"))]') == '[\"zt-order-native\",\"zt-order-docker\"]' ]]"
 fi
 
+rm -f "$pattern"
 echo
 printf '%d passed, %d failed\n' "$passed" "$failed"
 ((failed == 0)) || { printf '  - %s\n' "${failures[@]}"; exit 1; }
