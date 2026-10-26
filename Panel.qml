@@ -43,6 +43,50 @@ Panel {
   property string armedDelete: ""
   property string copiedName: ""
   property string shownCreds: ""
+  property string shownTools: ""      // the server whose backup / restore / port tools are open
+  property var backups: []
+  property string armedRestore: ""
+  property string portDraft: ""       // kept here: a state refresh rebuilds the rows
+  property bool portFocus: false
+  property bool omatable: false       // OmaTable is installed: offer Open in OmaTable
+
+  function human(n) {
+    return n >= 1073741824 ? (n / 1073741824).toFixed(1) + " GB" : n >= 1048576 ? Math.round(n / 1048576) + " MB"
+      : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B"
+  }
+  function uptime(since) {
+    const s = Math.max(0, Date.now() / 1000 - since)
+    return s < 3600 ? Math.max(1, Math.round(s / 60)) + " min" : s < 86400 ? Math.round(s / 3600) + " h" : Math.round(s / 86400) + " d"
+  }
+  function health(s) {
+    const parts = []
+    if (s.running && s.since) parts.push("up " + uptime(s.since))
+    if (s.size) parts.push(human(s.size) + " data")
+    if (s.running && s.memory) parts.push(human(s.memory) + " RAM")
+    return parts.join("  ·  ")
+  }
+  function openInOmaTable(name) {
+    root.close()
+    Quickshell.execDetached(["omarchy-shell", "shell", "summon", "blackcode.omatable", JSON.stringify({ connect: "omadb:" + name })])
+  }
+  function toggleTools(name) {
+    root.armedRestore = ""
+    root.portDraft = ""
+    root.portFocus = false
+    root.shownTools = root.shownTools === name ? "" : name
+    root.backups = []
+    if (root.shownTools) loadBackups()
+  }
+  function loadBackups() {
+    if (!root.shownTools || backupsProc.running) return
+    backupsProc.command = [root.ctl, "backups", root.shownTools]
+    backupsProc.running = true
+  }
+  function restoreBackup(name, path) {
+    if (root.armedRestore !== path) { root.armedRestore = path; return }
+    root.armedRestore = ""
+    run(name, "Restoring", ["restore", name, path])
+  }
 
   function refresh() {
     if (stateProc.running) { refreshTimer.restart(); return }
@@ -149,6 +193,7 @@ Panel {
   Component.onCompleted: refresh()
 
   onOpenedChanged: {
+    root.portFocus = false
     if (opened) {
       refresh()
       root.errorText = ""
@@ -194,9 +239,11 @@ Panel {
       onStreamFinished: {
         let s
         try { s = JSON.parse(text) } catch (e) { return }
+        root.omatable = !!s.omatable
         root.dockerStatus = s.docker || "missing"
         root.engines = s.engines || []
-        root.services = s.services || []
+        // a new list rebuilds the rows, which would take the port field's focus (and draft) mid-typing
+        if (!root.portFocus) root.services = s.services || []
         root.installed = s.installed || []
         root.stateLoaded = true
       }
@@ -217,8 +264,17 @@ Panel {
       if (exitCode !== 0) root.errorText = root.stderrLines.slice(-2).join("\n") || "Failed."
       if (root.busyLabel === "Creating") root.createFinished(exitCode === 0)
       root.refresh()
+      root.loadBackups()
       root.runNext()
       if (root.opened && !portProc.running) { portProc.command = [root.ctl, "port", root.newEngine]; portProc.running = true }
+    }
+  }
+
+  Process {
+    id: backupsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: { try { root.backups = JSON.parse(text) } catch (e) { root.backups = [] } }
     }
   }
 
@@ -494,7 +550,8 @@ Panel {
               textFormat: Text.PlainText
               anchors.left: parent.left
               anchors.leftMargin: Style.space(10)
-              anchors.verticalCenter: parent.verticalCenter
+              // level with the name, also when the tools below it are open
+              y: rowText.y + rowName.y + (rowName.height - height) / 2
               text: "●"
               color: row.modelData.running ? (row.modelData.health === "starting" ? Color.accent : "#4caf50") : Qt.darker(root.fg, 2.2)
               font.pixelSize: Style.font.caption
@@ -511,6 +568,7 @@ Panel {
               spacing: Style.space(2)
 
               Text {
+                id: rowName
                 textFormat: Text.PlainText
                 width: parent.width
                 elide: Text.ElideRight
@@ -527,9 +585,7 @@ Panel {
                 elide: Text.ElideRight
                 text: row.armed ? "Click 󰆴 again to delete it and its data" : (row.modelData.mode === "docker" ? "󰡨 " : "󰆼 ")
                   + root.engineInfo(row.modelData.engine).title + " " + (row.modelData.exact || row.modelData.version)
-                  + "  ·  :" + row.modelData.port + "  ·  "
-                  + (row.armed ? "Click 󰆴 again to delete"
-                    : root.copiedName === row.modelData.name ? "URL copied" : root.statusText(row.modelData))
+                  + "  ·  :" + row.modelData.port
                 color: row.armed ? Color.urgent : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
@@ -546,14 +602,121 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                visible: !row.armed && text !== ""
+                wrapMode: Text.Wrap
+                // the green dot already says "Running"
+                text: [root.copiedName === row.modelData.name ? "URL copied" : root.statusText(row.modelData), root.health(row.modelData)]
+                  .filter(function(t) { return t !== "" && t !== "Running" }).join("  ·  ")
+                color: Qt.darker(root.fg, 1.6)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                textFormat: Text.PlainText
+                width: parent.width
+                visible: !!row.modelData.error && !row.modelData.running
+                wrapMode: Text.Wrap
+                maximumLineCount: 3
+                elide: Text.ElideRight
+                text: row.modelData.error || ""
+                color: Color.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              // backup, restore and port, under the row when ⋯ is on
+              Column {
+                width: parent.width
+                visible: root.shownTools === row.modelData.name
+                spacing: Style.space(6)
+                topPadding: Style.space(6)
+                Row {
+                  spacing: Style.space(8)
+                  Chip {
+                    label: row.modelData.engine === "mongodb" ? "Back up in OmaTable" : "󰁯  Back up to ~/Downloads"
+                    onPicked: row.modelData.engine === "mongodb" ? root.openInOmaTable(row.modelData.name)
+                      : root.run(row.modelData.name, "Backing up", ["backup", row.modelData.name])
+                  }
+                  TextField {
+                    id: movePort
+                    width: Style.space(70)
+                    foreground: root.fg
+                    placeholderText: String(row.modelData.port)
+                    text: root.portDraft
+                    onTextEdited: root.portDraft = text
+                    onActiveFocusChanged: root.portFocus = activeFocus
+                    onAccepted: moveChip.picked()
+                  }
+                  Chip {
+                    id: moveChip
+                    label: "Move to port"
+                    onPicked: {
+                      movePort.focus = false
+                      root.portFocus = false
+                      if (root.portDraft) root.run(row.modelData.name, "Moving", ["set-port", row.modelData.name, root.portDraft])
+                      root.portDraft = ""
+                    }
+                  }
+                }
+                Text {
+                  visible: root.backups.length === 0 && row.modelData.engine !== "mongodb"
+                  text: "No backups of " + row.modelData.name + " in ~/Downloads yet"
+                  color: Qt.darker(root.fg, 1.6)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Repeater {
+                  model: root.backups
+                  delegate: Row {
+                    required property var modelData
+                    spacing: Style.space(10)
+                    Text {
+                      width: Style.space(200)
+                      elide: Text.ElideMiddle
+                      text: modelData.path.split("/").pop() + "  ·  " + root.human(modelData.bytes)
+                      color: root.fg
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      anchors.verticalCenter: parent.verticalCenter
+                    }
+                    Chip {
+                      label: root.armedRestore === modelData.path ? "Click again: replaces data" : "Restore"
+                      selected: root.armedRestore === modelData.path
+                      onPicked: root.restoreBackup(row.modelData.name, modelData.path)
+                    }
+                  }
+                }
+              }
             }
 
             Row {
               id: rowActions
               anchors.right: parent.right
               anchors.rightMargin: Style.space(8)
-              anchors.verticalCenter: parent.verticalCenter
+              anchors.top: parent.top
+              anchors.topMargin: Style.space(14)
               spacing: Style.space(12)
+
+              IconAction {
+                anchors.verticalCenter: parent.verticalCenter
+                visible: root.omatable
+                text: "\uf0ce"
+                tip: "Open in OmaTable"
+                onActivated: root.openInOmaTable(row.modelData.name)
+              }
+
+              IconAction {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "\uf141"
+                color: root.shownTools === row.modelData.name ? Color.accent : Qt.darker(root.fg, 1.5)
+                tip: "Back up, restore, change port"
+                onActivated: root.toggleTools(row.modelData.name)
+              }
 
               IconAction {
                 anchors.verticalCenter: parent.verticalCenter

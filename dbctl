@@ -25,6 +25,10 @@
 #   dbctl logs <name>               follow the server log in a terminal
 #   dbctl port <engine>             next free port for an engine
 #   dbctl install <engine> <version>  download a native engine without creating a server
+#   dbctl backup <name> [file]      dump every database (Redis/Valkey: an RDB) to ~/Downloads
+#   dbctl restore <name> <file>     load a dump or an RDB snapshot into the server
+#   dbctl backups <name>            JSON: this server's backups in ~/Downloads, newest first
+#   dbctl set-port <name> <port>    move a server to another port
 #
 # Native downloads are pinned and checksummed in engines.lock (see tools/update-engines-lock).
 
@@ -660,6 +664,8 @@ cmd_state() {
         state: .State.Status,
         health: (.State.Health.Status // ""),
         running: .State.Running,
+        since: (if .State.Running then (.State.StartedAt | sub("\\.[0-9]+"; "") | fromdateiso8601) else 0 end),
+        error: (.State.Error // ""),
         autostart: (.HostConfig.RestartPolicy.Name == "unless-stopped" or .HostConfig.RestartPolicy.Name == "always")
       }]')
     fi
@@ -677,15 +683,33 @@ cmd_state() {
       failed) state=failed ;;
       *) state=exited ;;
       esac
-      jq -c --arg state "$state" --arg enabled "$enabled" \
-        '. + {state: $state, health: "", running: ($state == "running"), autostart: ($enabled == "enabled")}' "$f"
+      # health: memory and start time from systemd, disk size cached for a minute, the last error when it failed
+      local mem since size sizef err=""
+      mem=$(systemctl --user show -p MemoryCurrent --value "$(unit "$name")" 2>/dev/null)
+      [[ $mem =~ ^[0-9]+$ ]] || mem=0
+      since=$(systemctl --user show -p ActiveEnterTimestamp --value "$(unit "$name")" 2>/dev/null)
+      since=$([[ -n $since && $state == running ]] && date -d "$since" +%s 2>/dev/null || echo 0)
+      sizef="$(dirname "$f")/run/.size"
+      if [[ -f $sizef && $(($(date +%s) - $(stat -c %Y "$sizef"))) -lt 60 ]]; then
+        size=$(<"$sizef")
+      else
+        size=$(du -sb "$(dirname "$f")/data" 2>/dev/null | cut -f1)
+        [[ -n $size ]] && mkdir -p "$(dirname "$sizef")" && echo "$size" >"$sizef"
+      fi
+      [[ $state == failed ]] && err=$(journalctl --user -u "$(unit "$name")" -n 30 --no-pager -o cat 2>/dev/null |
+        grep -iE 'error|fatal|panic|failed|denied|in use' | grep -v 'Failed with result' | tail -1 | cut -c1-200)
+      jq -c --arg state "$state" --arg enabled "$enabled" --argjson mem "$mem" --argjson since "${since:-0}" \
+        --argjson size "${size:-0}" --arg err "$err" \
+        '. + {state: $state, health: "", running: ($state == "running"), autostart: ($enabled == "enabled"),
+              memory: $mem, since: $since, size: $size, error: $err}' "$f"
     done | jq -sc .)
   fi
 
   jq -nc --arg docker "$status" --argjson engines "$engines" --argjson installed "$installed" \
     --argjson a "$docker_services" --argjson b "$native_services" \
+    --argjson omatable "$([[ -d $HOME/.config/omarchy/plugins/blackcode.omatable ]] && echo true || echo false)" \
     'def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
-     {docker: $docker, engines: $engines, installed: $installed,
+     {docker: $docker, engines: $engines, installed: $installed, omatable: $omatable,
       services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // ""))
         | sort_by(.created | sub("\\.[0-9]+"; "") | sub("Z$"; "+00:00")
             | capture("^(?<t>.{19})(?<s>[+-])(?<h>..):(?<m>..)$")
@@ -844,8 +868,164 @@ cmd_logs() {
   fi
 }
 
+# ---- backup, restore, port, health (1.5.0) -----------------------------------
+
+engine_base() { echo "$ENGINES_DIR/$(field_of "$1" engine)/$(field_of "$1" exact)"; }
+
+# backup <name> [file]: a dump of every database on the server (Redis/Valkey: an RDB snapshot)
+cmd_backup() {
+  local name=${1:-} file=${2:-} engine port base c tmp ext
+  require_managed "$name"
+  engine=$(field_of "$name" engine)
+  port=$(field_of "$name" port)
+  creds_of "$name"
+  [[ $engine == mongodb ]] && fail "MongoDB backups: open the server in OmaTable and use Database ▾ → Back up"
+  ext=sql
+  [[ $engine == redis || $engine == valkey ]] && ext=rdb
+  [[ -n $file ]] || file="$HOME/Downloads/$name-$(date +%Y%m%d-%H%M%S).$ext"
+  [[ -d $(dirname "$file") ]] || mkdir -p "$(dirname "$file")"
+  [[ -e $file ]] && fail "$file already exists"
+  tmp="$file.part-$$"
+  umask 077
+  c=$(container "$name")
+  if [[ $MODE == native ]]; then
+    base=$(engine_base "$name")
+    # MySQL's clients need the engine's compat libraries (libncurses) too
+    if [[ -d $base/compat ]]; then export LD_LIBRARY_PATH=$base/compat; fi
+    case $engine in
+    postgresql) PGPASSWORD="$PASS_" "$base/bin/pg_dumpall" -h 127.0.0.1 -p "$port" -U "$USER_" --no-password -f "$tmp" ;;
+    mysql) MYSQL_PWD="$PASS_" "$base/bin/mysqldump" -h127.0.0.1 -P"$port" -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    mariadb) MYSQL_PWD="$PASS_" "$base/bin/mariadb-dump" -h127.0.0.1 -P"$port" -u"$USER_" --skip-ssl --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    redis | valkey) "$base/bin/$engine-cli" -p "$port" ${PASS_:+--user "$USER_" --pass "$PASS_" --no-auth-warning} --rdb "$tmp" >/dev/null 2>&1 ;;
+    esac
+  else
+    case $engine in
+    postgresql) docker exec -e PGPASSWORD="$PASS_" "$c" pg_dumpall -U "$USER_" >"$tmp" ;;
+    mysql) docker exec -e MYSQL_PWD="$PASS_" "$c" mysqldump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    mariadb) docker exec -e MYSQL_PWD="$PASS_" "$c" mariadb-dump -u"$USER_" --all-databases --routines --events --triggers --single-transaction >"$tmp" ;;
+    redis | valkey)
+      docker exec "$c" "$engine-cli" ${PASS_:+--user "$USER_" --pass "$PASS_" --no-auth-warning} --rdb /tmp/omadbngin-backup.rdb >/dev/null 2>&1 &&
+        docker cp "$c:/tmp/omadbngin-backup.rdb" "$tmp" >/dev/null && docker exec "$c" rm -f /tmp/omadbngin-backup.rdb ;;
+    esac
+  fi || { rm -f "$tmp"; fail "backup of $name failed"; }
+  [[ -s $tmp ]] || { rm -f "$tmp"; fail "backup of $name is empty"; }
+  chmod 600 "$tmp" # docker cp keeps the mode from inside the container
+  mv "$tmp" "$file"
+  echo "$file"
+}
+
+# restore <name> <file>: SQL runs against the server; an RDB replaces the Redis/Valkey data
+cmd_restore() {
+  local name=${1:-} file=${2:-} engine port base c dir
+  require_managed "$name"
+  [[ -f $file ]] || fail "no file at $file"
+  engine=$(field_of "$name" engine)
+  port=$(field_of "$name" port)
+  creds_of "$name"
+  c=$(container "$name")
+  case $engine in
+  mongodb) fail "MongoDB restores: open the server in OmaTable and use Database ▾ → Restore" ;;
+  redis | valkey)
+    [[ $(head -c 5 "$file") == REDIS ]] || fail "$file is not an RDB snapshot"
+    if [[ $MODE == native ]]; then
+      dir=$(server_dir "$name")/data
+      systemctl --user stop "$(unit "$name")"
+      install -m 600 "$file" "$dir/dump.rdb"
+      # With its append-only log on, the server would ignore the snapshot: start once with the
+      # log off so it loads the snapshot, then turn the log back on (it is rebuilt from the data).
+      local conf cli aof=""
+      conf=$(server_dir "$name")/$engine.conf
+      cli=("$(engine_base "$name")/bin/$engine-cli" -p "$port")
+      [[ -n $PASS_ ]] && cli+=(--user "$USER_" --pass "$PASS_" --no-auth-warning)
+      grep -q '^appendonly yes' "$conf" && aof=1
+      rm -rf "$dir/appendonlydir" "$dir"/appendonly*.aof
+      [[ -n $aof ]] && sed -i 's/^appendonly yes/appendonly no/' "$conf"
+      systemctl --user start "$(unit "$name")"
+      if [[ -n $aof ]]; then
+        for _ in $(seq 50); do "${cli[@]}" ping >/dev/null 2>&1 && break; sleep 0.2; done
+        sed -i 's/^appendonly no/appendonly yes/' "$conf"
+        "${cli[@]}" config set appendonly yes >/dev/null || fail "restored, but turning the append-only log back on failed"
+      fi
+    else
+      docker stop "$c" >/dev/null
+      docker cp "$file" "$c:/data/dump.rdb" >/dev/null
+      docker start "$c" >/dev/null
+    fi
+    return ;;
+  esac
+  if [[ $MODE == native ]]; then
+    base=$(engine_base "$name")
+    # MySQL's clients need the engine's compat libraries (libncurses) too
+    if [[ -d $base/compat ]]; then export LD_LIBRARY_PATH=$base/compat; fi
+    case $engine in
+    postgresql) PGPASSWORD="$PASS_" "$base/bin/psql" -X -q -h 127.0.0.1 -p "$port" -U "$USER_" -d postgres -f "$file" 2>&1 >/dev/null | grep -v 'already exists' >&2; return "${PIPESTATUS[0]}" ;;
+    mysql) MYSQL_PWD="$PASS_" "$base/bin/mysql" -h127.0.0.1 -P"$port" -u"$USER_" <"$file" ;;
+    mariadb) MYSQL_PWD="$PASS_" "$base/bin/mariadb" -h127.0.0.1 -P"$port" -u"$USER_" --skip-ssl <"$file" ;;
+    esac
+  else
+    case $engine in
+    postgresql) docker exec -i -e PGPASSWORD="$PASS_" "$c" psql -X -q -U "$USER_" -d postgres <"$file" 2>&1 >/dev/null | grep -v 'already exists' >&2; return "${PIPESTATUS[0]}" ;;
+    mysql | mariadb) docker exec -i -e MYSQL_PWD="$PASS_" "$c" "$engine" -u"$USER_" <"$file" ;;
+    esac
+  fi || fail "restore into $name failed"
+}
+
+# backups <name>: JSON list of this server's backups in ~/Downloads, newest first
+cmd_backups() {
+  local name=${1:-}
+  [[ -n $name ]] || fail "missing server name"
+  find "$HOME/Downloads" -maxdepth 1 -type f \( -name "$name-*.sql" -o -name "$name-*.rdb" \) -printf '%T@\t%s\t%p\n' 2>/dev/null |
+    sort -rn | head -20 | jq -Rsc 'split("\n") | map(select(length > 0) | split("\t") | {path: .[2], bytes: (.[1] | tonumber), time: (.[0] | tonumber | floor)})'
+}
+
+# set-port <name> <new port>: move a server to another port (it restarts if it was running)
+cmd_set_port() {
+  local name=${1:-} new=${2:-} engine dir base exact running auth="" image inner data env cmd
+  require_managed "$name"
+  [[ $new =~ ^[0-9]+$ ]] && ((new >= 1024 && new <= 65535)) || fail "port must be 1024–65535"
+  [[ $new == "$(field_of "$name" port)" ]] && return
+  port_taken "$new" && fail "port $new is already in use"
+  engine=$(field_of "$name" engine)
+  if [[ $MODE == native ]]; then
+    dir=$(server_dir "$name")
+    exact=$(field_of "$name" exact)
+    base=$(engine_base "$name")
+    running=$(systemctl --user is-active "$(unit "$name")" 2>/dev/null || true)
+    [[ $engine == mongodb && -n $(field_of "$name" password) && $(field_of "$name" password) != null ]] && auth=auth
+    # the new start command first, so a failure leaves every file as it was
+    local start
+    start=$(with_compat "$base" "$(native_exec "$engine" "$base" "$dir" "$new" $auth)")
+    [[ -n $start ]] || fail "could not build the start command for $name"
+    jq --argjson p "$new" '.port = $p' "$dir/server.json" >"$dir/server.json.new" && mv "$dir/server.json.new" "$dir/server.json"
+    chmod 600 "$dir/server.json"
+    [[ -f $dir/$engine.conf ]] && sed -i "s/^port .*/port $new/" "$dir/$engine.conf"
+    write_unit "$name" "$engine" "$exact" "$start"
+    [[ $running == active || $running == failed ]] && systemctl --user restart "$(unit "$name")"
+    return 0
+  else
+    # a container's ports are fixed: make it again on the same volume
+    local c info
+    c=$(container "$name")
+    info=$(docker inspect "$c")
+    image=$(jq -r '.[0].Config.Image' <<<"$info")
+    inner=$(jq -r '.[0].HostConfig.PortBindings | keys[0] | split("/")[0]' <<<"$info")
+    data=$(jq -r --arg v "$c" '.[0].Mounts[] | select(.Name == $v) | .Destination' <<<"$info")
+    mapfile -t env < <(jq -r '.[0].Config.Env[] | select(test("^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_")) | "-e", .' <<<"$info")
+    mapfile -t cmd < <(jq -r '.[0].Config.Cmd // [] | .[]' <<<"$info")
+    running=$(jq -r '.[0].State.Running' <<<"$info")
+    local auto=off user pass
+    [[ $(jq -r '.[0].HostConfig.RestartPolicy.Name' <<<"$info") == unless-stopped ]] && auto=on
+    user=$(field_of "$name" user)
+    pass=$(field_of "$name" password)
+    docker rm -f "$c" >/dev/null
+    docker_run "$name" "$engine" "$(field_of_label_version "$info")" "$new" "$auto" "$user" "$pass" "$image" "$inner" "$data" "${#env[@]}" "${env[@]}" "${cmd[@]}"
+    [[ $running == true ]] || docker stop "$c" >/dev/null
+  fi
+}
+field_of_label_version() { jq -r '.[0].Config.Labels["omadbngin.version"]' <<<"$1"; }
+
 case "${1:-}" in
-state | create | start | stop | restart | remove | autostart | url | copy | client | logs | port | install) migrate_legacy ;;
+state | create | start | stop | restart | remove | autostart | url | copy | client | logs | port | install | backup | restore | set-port) migrate_legacy ;;
 esac
 
 case "${1:-}" in
@@ -858,10 +1038,14 @@ url) cmd_url "${2:-}" ;;
 copy) cmd_url "${2:-}" | tr -d '\n' | wl-copy ;;
 client) cmd_client "${2:-}" ;;
 logs) cmd_logs "${2:-}" ;;
+backup) shift; cmd_backup "$@" ;;
+restore) shift; cmd_restore "$@" ;;
+backups) cmd_backups "${2:-}" ;;
+set-port) shift; cmd_set_port "$@" ;;
 port) next_port "${2:-}" ;;
 install)
   [[ " $(engine_field "${2:-}" versions) " == *" ${3:-} "* ]] || fail "usage: install <engine> <version>"
   ensure_engine "$2" "$3"
   ;;
-*) sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+*) sed -n '3,31p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

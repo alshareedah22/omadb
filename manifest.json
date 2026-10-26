@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "blackcode.omadbngin",
   "name": "OmaDBngin",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "author": "BlackCode",
   "license": "MIT",
   "description": "OmaDBngin: DBngin-style local database servers for the Omarchy bar. PostgreSQL, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, as the native engine or in Docker, started and stopped with a click",

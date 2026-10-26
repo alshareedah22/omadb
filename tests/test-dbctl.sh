@@ -112,6 +112,18 @@ data() {
   esac
 }
 
+# drop the marker value written by `data write`
+forget() {
+  local engine=$1 port=$2 user=$3 pass=$4
+  case $engine in
+  postgresql) PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -qc 'drop table omadb_t' ;;
+  mysql | mariadb) with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -p"$pass" -e 'drop database omadb' 2>/dev/null ;;
+  redis | valkey) "$(engine_bin "$engine" "$engine-cli")" -p "$port" --user "$user" --pass "$pass" --no-auth-warning del omadb | grep -qx 1 ;;
+  esac
+}
+
+free_port() { local p; for p in $(seq 56100 56199); do port_open "$p" || { echo "$p"; return; }; done; }
+
 field() { "$DBCTL" state | jq -r --arg n "$1" ".services[] | select(.name == \$n) | .$2"; }
 port_open() { ss -ltnH "sport = :$1" | grep -q .; }
 
@@ -188,6 +200,36 @@ run_mode() {
   check "data survives stop and start" eventually data read "$engine" "$port" "$user" "$PASS"
   check "restart" "$DBCTL" restart "$n"
   check "data survives restart" eventually data read "$engine" "$port" "$user" "$PASS"
+
+  if [[ $engine == mongodb ]]; then
+    refute "backup points MongoDB to OmaTable" "$DBCTL" backup "$n"
+  else
+    local bk
+    bk=$(mktemp -d)
+    check "backup to a file" "$DBCTL" backup "$n" "$bk/dump"
+    check "the backup is private and not empty" bash -c "[[ -s '$bk/dump' && \$(stat -c %a '$bk/dump') == 600 ]]"
+    refute "backup will not overwrite a file" "$DBCTL" backup "$n" "$bk/dump"
+    check "no partial file is left" bash -c "! ls '$bk'/*.part-* 2>/dev/null"
+    check "forget the data" forget "$engine" "$port" "$user" "$PASS"
+    refute "the data is gone" data read "$engine" "$port" "$user" "$PASS"
+    check "restore" "$DBCTL" restore "$n" "$bk/dump"
+    check "the restore brings the data back" eventually data read "$engine" "$port" "$user" "$PASS"
+    refute "restore refuses a missing file" "$DBCTL" restore "$n" "$bk/nope"
+    local def
+    def=$("$DBCTL" backup "$n")
+    check "a backup without a file goes to ~/Downloads" bash -c "[[ '$def' == '$HOME/Downloads/$n-'* && -s '$def' ]]"
+    check "backups lists it" bash -c "'$DBCTL' backups $n | jq -e --arg f '$def' '.[0].path == \$f and .[0].bytes > 0'"
+    rm -rf "$bk" "$def"
+
+    local np
+    np=$(free_port)
+    check "set-port moves it to $np" "$DBCTL" set-port "$n" "$np"
+    check "state shows the new port" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | .port') == $np ]]"
+    check "the data answers on the new port" eventually data read "$engine" "$np" "$user" "$PASS"
+    check "the old port is closed" eventually bash -c "! ss -ltnH 'sport = :$port' | grep -q ."
+    refute "set-port refuses a port below 1024" "$DBCTL" set-port "$n" 80
+    port=$np
+  fi
 
   check "autostart on" "$DBCTL" autostart "$n" on
   check "state says autostart" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | .autostart') == true ]]"

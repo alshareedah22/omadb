@@ -12,7 +12,18 @@ A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 - **See** its username and password (󰌆), **copy** its connection URL with them (󰆏), open its **CLI client** in a terminal (),
   follow its **logs** (󰦪)
 - Make it **start with the system** (󰐥)
+- **Open** it in [OmaTable](https://github.com/alshareedah22/omatable) (, when OmaTable is installed)
 - **Delete** it and its data (󰆴, click twice)
+
+Each running server shows its uptime, memory and data size; a failed one shows the
+last error from its log. The  button opens its tools:
+
+- **Back up** every database to `~/Downloads/<name>-<date>.sql` (Redis/Valkey: an
+  `.rdb` snapshot). MongoDB backups are made in OmaTable (*Database ▾ → Back up*).
+- **Restore** one of the listed backups (click twice). SQL dumps run against the server;
+  an RDB snapshot replaces the Redis/Valkey data.
+- **Move to port**: the server gets a new port and restarts if it was running (Docker
+  servers are recreated on the same volume, so the data stays).
 
 The bar shows how many servers are running; hover for the list.
 
@@ -115,6 +126,10 @@ dbctl install mysql 8.4                      # download a native engine ahead of
 dbctl start|stop|restart app-db
 dbctl url app-db                             # postgresql://postgres@127.0.0.1:5433/postgres
 dbctl client app-db
+dbctl backup app-db [file]                   # default ~/Downloads/app-db-<date>.sql
+dbctl restore app-db ~/Downloads/app-db-20261026-101500.sql
+dbctl backups app-db                         # JSON list of its backups, newest first
+dbctl set-port app-db 5440
 dbctl remove app-db [--keep-data]
 ```
 
