@@ -96,6 +96,8 @@ mode_of() {
 
 require_managed() {
   [[ -n ${1:-} ]] || fail "missing server name"
+  # The same rule create uses, so a name can never point outside the servers folder.
+  [[ $1 =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "no server named $1"
   MODE=$(mode_of "$1")
   [[ -n $MODE ]] || fail "no server named $1"
 }
@@ -233,7 +235,7 @@ fetch_verified() {
   sha=$(jq -r .sha256 <<<"$pin")
   [[ $sha =~ ^[0-9a-f]{64}$ ]] || fail "engines.lock has no valid checksum for ${out##*/}"
   while IFS= read -r url; do
-    curl -fL --retry 3 -o "$out" "$url" 2>/dev/null || continue
+    curl -fL --proto =https --connect-timeout 15 --retry 3 -o "$out" "$url" 2>/dev/null || continue
     got=$(sha256sum "$out" | cut -d' ' -f1)
     [[ $got == "$sha" ]] && return 0
     rm -f "$out"

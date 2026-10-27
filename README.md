@@ -174,11 +174,30 @@ ordering, input validation, that every native build and Docker image is pinned i
 
 ## Remove
 
+Removing the plugin does not stop your database servers: native servers are systemd user
+services and Docker servers restart on their own, and both keep their data. So delete them
+first, while `dbctl` is still installed (in the panel, or for all of them at once):
+
 ```bash
+D=~/.config/omarchy/plugins/blackcode.omadbngin/dbctl
+for s in $("$D" state | jq -r '.services[].name'); do "$D" remove "$s"; done
 omarchy plugin remove blackcode.omadbngin
 ```
 
-Servers keep running until you delete them, so delete them in the panel first.
-Leftovers: `ls ~/.local/share/omadbngin/servers` (native) and
-`docker ps -a --filter label=omadbngin.managed=1` (Docker). Downloaded engines live in
-`~/.local/share/omadbngin/engines`.
+Then, if you want the disk space back (this deletes all server data and backups made with
+"keep data"):
+
+```bash
+rm -rf ~/.local/share/omadbngin          # downloaded engines, servers, *.removed-<date> folders
+docker ps -a --filter label=omadbngin.managed=1   # should be empty
+docker volume ls --filter name=omadbngin-          # remove any left with: docker volume rm <name>
+docker volume ls --filter name=omadb-              # volumes kept from the 1.x migration
+```
+
+Backups you exported stay in `~/Downloads`. If you removed the plugin first, the servers keep
+running from `~/.local/share/omadbngin`; stop each native one with
+`systemctl --user disable --now omadbngin-<name>.service` (then delete its file in
+`~/.config/systemd/user/`) and each Docker one with `docker rm -f <container>`.
+
+Passwords are stored for the panel and OmaTablePlus: in each server's `server.json` (mode 600)
+and, for Docker servers, as a container label that members of the `docker` group can read.
