@@ -753,7 +753,7 @@ Panel {
             selected: root.newMode === modelData.value
             onPicked: {
               root.newMode = modelData.value
-              // Docker-only engines (PostGIS) are not offered natively.
+              // Docker-only engines (PostGIS) cannot run natively.
               if (modelData.value === "native" && root.newEngineInfo.dockerOnly) root.pickEngine("postgresql")
             }
           }
@@ -765,12 +765,16 @@ Panel {
         width: parent.width
         spacing: Style.space(6)
         Repeater {
-          model: root.engines.filter(function(e) { return root.newMode === "docker" || !e.dockerOnly })
+          model: root.engines
           Chip {
             required property var modelData
-            label: modelData.title
+            // Docker-only engines (PostGIS) carry the Docker mark and switch the form to Docker.
+            label: modelData.dockerOnly ? modelData.title + " 󰡨" : modelData.title
             selected: root.newEngine === modelData.id
-            onPicked: root.pickEngine(modelData.id)
+            onPicked: {
+              if (modelData.dockerOnly) root.newMode = "docker"
+              root.pickEngine(modelData.id)
+            }
           }
         }
       }
