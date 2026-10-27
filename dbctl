@@ -31,7 +31,8 @@
 #   dbctl backups <name>            JSON: this server's backups in ~/Downloads, newest first
 #   dbctl set-port <name> <port>    move a server to another port
 #
-# Native downloads are pinned and checksummed in engines.lock (see tools/update-engines-lock).
+# Native downloads are pinned and checksummed in engines.lock, and Docker images are pinned
+# there by digest (see tools/update-engines-lock).
 
 set -euo pipefail
 
@@ -512,16 +513,70 @@ create_native() {
   fail "$name did not start listening on port $port"
 }
 
+# ---- Docker images: pinned by digest -----------------------------------------
+#
+# engines.lock pins every Docker engine version to <repository>:<tag> plus the digest of
+# the tag's multi-arch index, and new servers run <repository>:<tag>@<digest>: Docker
+# checks what it pulls against the digest, so a moved or compromised tag upstream cannot
+# change the code that gets the server's credentials and data. A version without a pin is
+# refused. Regenerate with tools/update-engines-lock docker.
+
+docker_repo() {
+  case $1 in
+  postgresql) echo postgres ;;
+  postgis) echo postgis/postgis ;;
+  mysql) echo mysql ;;
+  mariadb) echo mariadb ;;
+  redis) echo redis ;;
+  valkey) echo valkey/valkey ;;
+  mongodb) echo mongo ;;
+  *) fail "no Docker image for $1" ;;
+  esac
+}
+
+# pinned_image <engine> <version>: <repository>:<tag>@sha256:<digest>
+pinned_image() {
+  local repo pin image tag digest
+  [[ -f $LOCK ]] || fail "engines.lock is missing; reinstall the plugin"
+  repo=$(docker_repo "$1")
+  pin=$(jq -r --arg e "$1" --arg l "$2" '.docker[$e][$l] // empty | "\(.image) \(.tag) \(.digest)"' "$LOCK")
+  [[ -n $pin ]] || fail "no pinned Docker image for $1 $2 in engines.lock; nothing was created"
+  read -r image tag digest <<<"$pin"
+  [[ $image == "$repo" && $tag == "$2" ]] || fail "engines.lock pins $image:$tag for $1 $2, expected $repo:$2"
+  [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || fail "engines.lock has no valid image digest for $1 $2"
+  echo "$repo:$tag@$digest"
+}
+
+# image_of <container>: the image to make that container again with: exactly the one it
+# runs now. Containers from 1.6.1 on name it by digest already. Older ones name only a tag,
+# which may point somewhere else by now, so they get the digest of the image they run
+# (or, for an image without one, its local ID); never a fresh pull of the tag.
+image_of() {
+  local image id repo digest
+  image=$(docker inspect -f '{{.Config.Image}}' "$1") || return 1
+  if [[ $image == *@sha256:* ]]; then echo "$image"; return; fi
+  id=$(docker inspect -f '{{.Image}}' "$1") || return 1
+  repo=$image
+  [[ ${image##*/} == *:* ]] && repo=${image%:*}
+  repo=${repo#docker.io/}
+  repo=${repo#library/}
+  # RepoDigests name Docker Hub images the short way (postgres@…, postgis/postgis@…).
+  digest=$(docker image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' "$id" 2>/dev/null |
+    awk -v r="$repo" 'index($0, r "@sha256:") == 1 { print; exit }')
+  if [[ -n $digest ]]; then echo "$image@${digest#*@}"; else echo "$id"; fi
+}
+
 create_docker() {
   local engine=$1 version=$2 name=$3 port=$4 autostart=$5 user=$6 pass=$7
   [[ $(docker_status) == running ]] || fail "Docker is not running"
   local image inner data env=() cmd=()
+  # (create runs this in a subshell under `if`, where set -e is off: stop explicitly)
+  image=$(pinned_image "$engine" "$version") || exit 1
   case $engine in
   postgresql | postgis)
-    image="postgres:$version"
     # postgis/postgis:<major>-<postgis> is the official postgres image plus PostGIS. It turns the
     # extension on in POSTGRES_DB (which defaults to the user's name), so that is postgres here.
-    [[ $engine == postgis ]] && { image="postgis/postgis:$version"; env=(-e POSTGRES_DB=postgres); }
+    [[ $engine == postgis ]] && env=(-e POSTGRES_DB=postgres)
     inner=5432
     # Postgres 18 images moved PGDATA under /var/lib/postgresql/<major>.
     if ((${version%%[.-]*} >= 18)); then data=/var/lib/postgresql; else data=/var/lib/postgresql/data; fi
@@ -530,7 +585,6 @@ create_docker() {
     # (env goes to docker in a private --env-file, not on its command line: see docker_run)
     ;;
   mysql)
-    image="mysql:$version"
     inner=3306
     data=/var/lib/mysql
     # root gets its password while the image initializes (with networking off), so it is
@@ -539,21 +593,17 @@ create_docker() {
     if [[ -n $pass ]]; then env+=(-e "MYSQL_ROOT_PASSWORD=$pass"); else env+=(-e MYSQL_ALLOW_EMPTY_PASSWORD=yes); fi
     ;;
   mariadb)
-    image="mariadb:$version"
     inner=3306
     data=/var/lib/mysql
     if [[ -n $pass ]]; then env=(-e "MARIADB_ROOT_PASSWORD=$pass"); else env=(-e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1); fi
     ;;
   redis | valkey)
-    image="redis:$version"
-    [[ $engine == valkey ]] && image="valkey/valkey:$version"
     inner=6379
     data=/data
     redis_volume_conf "$name" "$image" "$user" "$pass"
     cmd=("$engine-server" /data/omadbngin.conf --appendonly yes)
     ;;
   mongodb)
-    image="mongo:$version"
     inner=27017
     data=/data/db
     [[ -n $user ]] && env=(-e "MONGO_INITDB_ROOT_USERNAME=$user" -e "MONGO_INITDB_ROOT_PASSWORD=$pass")
@@ -668,7 +718,7 @@ migrate_docker() {
     port=$(docker inspect -f '{{index .Config.Labels "omadb.port"}}' "$old")
     user=$(docker inspect -f '{{index .Config.Labels "omadb.user"}}' "$old")
     pass=$(docker inspect -f '{{index .Config.Labels "omadb.password"}}' "$old")
-    image=$(docker inspect -f '{{.Config.Image}}' "$old")
+    image=$(image_of "$old")
     restart=$(docker inspect -f '{{.HostConfig.RestartPolicy.Name}}' "$old")
     running=$(docker inspect -f '{{.State.Running}}' "$old")
     data=$(docker inspect -f '{{range .Mounts}}{{if eq .Name "'"$old"'"}}{{.Destination}}{{end}}{{end}}' "$old")
@@ -824,6 +874,8 @@ cmd_create() {
   [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
   [[ $mode == native || $mode == docker ]] || fail "mode must be native or docker"
   [[ $mode == native && $(engine_field "$engine" only) == docker ]] && fail "$(engine_field "$engine" title) runs in Docker only"
+  # Docker runs only images pinned by digest in engines.lock.
+  [[ $mode == docker ]] && { pinned_image "$engine" "$version" >/dev/null || exit 1; }
   [[ -z $user && -n $pass && $engine == mongodb ]] && user=admin
   [[ -z $user ]] && user=$(default_user "$engine")
   [[ -z $user || $user =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,31}$ ]] || fail "username: letters, digits, _ . - (up to 32)"
@@ -1065,7 +1117,7 @@ cmd_restore() {
       # in a throwaway server on the same volume with the log off, turn the log on so it is
       # rebuilt from the data, and hand the files back to the image's user.
       local image
-      image=$(docker inspect -f '{{.Config.Image}}' "$c")
+      image=$(image_of "$c")
       docker stop "$c" >/dev/null
       docker run --rm --volumes-from "$c" -v "$file:/omadbngin-restore.rdb:ro" --entrypoint sh "$image" -c '
         set -e
@@ -1146,7 +1198,7 @@ docker_recreate() {
   engine=$(field_of "$name" engine)
   c=$(container "$name")
   info=$(docker inspect "$c")
-  image=$(jq -r '.[0].Config.Image' <<<"$info")
+  image=$(image_of "$c") || fail "cannot read the image of $c"
   inner=$(jq -r '.[0].HostConfig.PortBindings | keys[0] | split("/")[0]' <<<"$info")
   data=$(jq -r --arg v "$c" '.[0].Mounts[] | select(.Name == $v) | .Destination' <<<"$info")
   mapfile -t env < <(jq -r '.[0].Config.Env[] | select(test("^(POSTGRES|MYSQL|MARIADB|MONGO_INITDB)_")) | "-e", .' <<<"$info")

@@ -1,10 +1,15 @@
 #!/bin/bash
 
 # Regenerate engines.lock: the exact build, download URL and SHA-256 that
-# `dbctl` will accept for every native engine line. Maintainer tool only; the
-# plugin itself never resolves versions or trusts an unpinned download.
+# `dbctl` will accept for every native engine line, and the image digest it
+# will run for every Docker engine version. Maintainer tool only; the plugin
+# itself never resolves versions or trusts an unpinned download or image tag.
 #
-#   tools/update-engines-lock            # newest patch release of every line
+#   tools/update-engines-lock            # both (the default)
+#   tools/update-engines-lock native     # native builds only: newest patch release of every line
+#   tools/update-engines-lock docker     # Docker image digests only
+#
+# The other half of the lock is kept as it is.
 #
 # Checksums come from what each upstream publishes over HTTPS (GitHub release
 # digests, MariaDB's REST API, MongoDB's full.json, redis-hashes, Valkey's
@@ -15,6 +20,8 @@ set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)
 LOCK="$here/engines.lock"
+WHAT=${1:-all}
+[[ $WHAT == all || $WHAT == native || $WHAT == docker ]] || { echo "usage: $0 [all|native|docker]" >&2; exit 1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
@@ -96,31 +103,92 @@ resolve() {
   esac
 }
 
-engines='{}'
-for e in "${ENGINES[@]}"; do
-  IFS='|' read -r id _title _port lines <<<"$e"
-  for line in $lines; do
-    echo "Resolving $id $line…" >&2
-    json=$(resolve "$id" "$line")
-    jq -e '.version != "" and (.sha256 | test("^[0-9a-f]{64}$")) and (.urls | length > 0)' <<<"$json" >/dev/null ||
-      { echo "incomplete entry for $id $line: $json" >&2; exit 1; }
-    engines=$(jq -c --arg e "$id" --arg l "$line" --argjson j "$json" '.[$e][$l] = $j' <<<"$engines")
+# ---- Docker images ---------------------------------------------------------------
+#
+# Every Docker engine version runs as <repository>:<tag>@<digest>, where the digest is
+# the tag's multi-arch index (manifest list) as the registry serves it now. Docker
+# checks what it pulls against the digest, so a moved or tampered tag cannot change
+# what runs until this lock is regenerated, reviewed and committed.
+
+# engine -> image repository (kept in step with create_docker in dbctl)
+docker_repo() {
+  case $1 in
+  postgresql) echo postgres ;;
+  postgis) echo postgis/postgis ;;
+  mysql) echo mysql ;;
+  mariadb) echo mariadb ;;
+  redis) echo redis ;;
+  valkey) echo valkey/valkey ;;
+  mongodb) echo mongo ;;
+  *) echo "no Docker image for $1" >&2; return 1 ;;
+  esac
+}
+
+index_digest() {
+  docker buildx imagetools inspect "$1" --format '{{json .Manifest}}' | jq -r '.digest // empty'
+}
+
+resolve_docker() {
+  local images='{}' id lines repo line digest
+  for e in "${ENGINES[@]}"; do
+    IFS='|' read -r id _title _port lines _only <<<"$e"
+    repo=$(docker_repo "$id")
+    for line in $lines; do
+      echo "Resolving image $repo:$line…" >&2
+      digest=$(index_digest "$repo:$line")
+      [[ $digest =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "no digest for $repo:$line" >&2; exit 1; }
+      images=$(jq -c --arg e "$id" --arg l "$line" --arg r "$repo" --arg d "$digest" \
+        '.[$e][$l] = {image: $r, tag: $l, digest: $d}' <<<"$images")
+    done
   done
-done
+  echo "$images"
+}
 
-echo "Resolving mongosh…" >&2
-v=$(gh_api repos/mongodb-js/mongosh/releases/latest | jq -r .tag_name | sed 's/^v//')
-asset="mongosh-$v-linux-x64.tgz"
-mongosh=$(entry "$v" "$(gh_digest mongodb-js/mongosh "v$v" "$asset")" "https://github.com/mongodb-js/mongosh/releases/download/v$v/$asset")
+# ---- Native builds ------------------------------------------------------------------
 
-echo "Resolving libxcrypt-compat…" >&2
-pkg=$(curl -fsSL https://archive.archlinux.org/packages/l/libxcrypt-compat/ |
-  grep -oE 'libxcrypt-compat-[0-9][^"]*-x86_64\.pkg\.tar\.zst' | sort -uV | tail -1)
-pv=${pkg#libxcrypt-compat-}
-url="https://archive.archlinux.org/packages/l/libxcrypt-compat/$pkg"
-libxcrypt=$(entry "${pv%-x86_64.pkg.tar.zst}" "$(hash_of "$url")" "$url")
+resolve_native() {
+  local engines='{}' id lines line json v asset url pkg pv mongosh libxcrypt
+  for e in "${ENGINES[@]}"; do
+    IFS='|' read -r id _title _port lines only <<<"$e"
+    [[ $only == docker ]] && continue
+    for line in $lines; do
+      echo "Resolving $id $line…" >&2
+      json=$(resolve "$id" "$line")
+      jq -e '.version != "" and (.sha256 | test("^[0-9a-f]{64}$")) and (.urls | length > 0)' <<<"$json" >/dev/null ||
+        { echo "incomplete entry for $id $line: $json" >&2; exit 1; }
+      engines=$(jq -c --arg e "$id" --arg l "$line" --argjson j "$json" '.[$e][$l] = $j' <<<"$engines")
+    done
+  done
 
-jq -n --arg generated "$(date -u +%Y-%m-%d)" --argjson engines "$engines" \
-  --argjson mongosh "$mongosh" --argjson libxcrypt "$libxcrypt" \
-  '{lockVersion: 1, generated: $generated, engines: $engines, extras: {mongosh: $mongosh, "libxcrypt-compat": $libxcrypt}}' >"$LOCK"
+  echo "Resolving mongosh…" >&2
+  v=$(gh_api repos/mongodb-js/mongosh/releases/latest | jq -r .tag_name | sed 's/^v//')
+  asset="mongosh-$v-linux-x64.tgz"
+  mongosh=$(entry "$v" "$(gh_digest mongodb-js/mongosh "v$v" "$asset")" "https://github.com/mongodb-js/mongosh/releases/download/v$v/$asset")
+
+  echo "Resolving libxcrypt-compat…" >&2
+  pkg=$(curl -fsSL https://archive.archlinux.org/packages/l/libxcrypt-compat/ |
+    grep -oE 'libxcrypt-compat-[0-9][^"]*-x86_64\.pkg\.tar\.zst' | sort -uV | tail -1)
+  pv=${pkg#libxcrypt-compat-}
+  url="https://archive.archlinux.org/packages/l/libxcrypt-compat/$pkg"
+  libxcrypt=$(entry "${pv%-x86_64.pkg.tar.zst}" "$(hash_of "$url")" "$url")
+
+  jq -nc --argjson engines "$engines" --argjson mongosh "$mongosh" --argjson libxcrypt "$libxcrypt" \
+    '{engines: $engines, extras: {mongosh: $mongosh, "libxcrypt-compat": $libxcrypt}}'
+}
+
+old='{}'
+[[ -f $LOCK ]] && old=$(cat "$LOCK")
+if [[ $WHAT == docker ]]; then
+  native=$(jq -c '{engines, extras}' <<<"$old")
+else
+  native=$(resolve_native)
+fi
+if [[ $WHAT == native ]]; then
+  docker_images=$(jq -c '.docker // {}' <<<"$old")
+else
+  docker_images=$(resolve_docker)
+fi
+
+jq -n --arg generated "$(date -u +%Y-%m-%d)" --argjson native "$native" --argjson docker "$docker_images" \
+  '{lockVersion: 1, generated: $generated} + $native + {docker: $docker}' >"$LOCK"
 echo "Wrote $LOCK" >&2

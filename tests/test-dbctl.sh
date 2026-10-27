@@ -167,6 +167,34 @@ check "and leaves nothing installed" bash -c "! ls -d '$export_home'/engines/val
 check "the error says why" bash -c "OMADBNGIN_HOME='$export_home' '$tamper/dbctl' install valkey 8 2>&1 | grep -q 'checksum mismatch'"
 rm -rf "$tamper"
 
+# ---- Pinned Docker images ---------------------------------------------------------
+
+echo
+echo "Pinned Docker images"
+check "every Docker version is pinned by digest" bash -c "
+  sed -n '/^ENGINES=(/,/^)/p' '$DBCTL' | grep -oE '\"[a-z]+\\|[^\"]+\"' | tr -d '\"' | while IFS='|' read -r e _t _p lines _o; do
+    for l in \$lines; do
+      jq -e --arg e \$e --arg l \$l '.docker[\$e][\$l] | (.tag == \$l) and (.image | length > 0) and (.digest | test(\"^sha256:[0-9a-f]{64}\$\"))' '$here/engines.lock' >/dev/null || { echo \"\$e \$l\"; exit 1; }
+    done
+  done"
+check "and nothing else" bash -c "[[ \$(jq '[.docker[] | keys[]] | length' '$here/engines.lock') == \$(sed -n '/^ENGINES=(/,/^)/p' '$DBCTL' | grep -oE '\"[a-z]+\\|[^\"]+\"' | cut -d'|' -f4 | wc -w) ]]"
+check "PostGIS is pinned to the postgis/postgis repository" jq -e '[.docker.postgis[].image] | unique == ["postgis/postgis"]' "$here/engines.lock"
+# A version with no pin must be refused before anything is made.
+tamper=$(mktemp -d)
+cp "$DBCTL" "$tamper/dbctl"
+jq 'del(.docker.postgis["18-3.6"])' "$here/engines.lock" >"$tamper/engines.lock"
+refute "an unpinned Docker version is refused" env OMADBNGIN_HOME="$tamper/home" "$tamper/dbctl" create postgis 18-3.6 zt-unpinned "" off docker
+check "the error says why" bash -c "OMADBNGIN_HOME='$tamper/home' '$tamper/dbctl' create postgis 18-3.6 zt-unpinned '' off docker 2>&1 | grep -q 'no pinned Docker image for postgis 18-3.6'"
+refute "and nothing was created" docker inspect omadbngin-zt-unpinned
+refute "not even a volume" docker volume inspect omadbngin-zt-unpinned
+jq '.docker.redis["7"].digest = "latest"' "$here/engines.lock" >"$tamper/engines.lock"
+refute "a malformed digest is refused" env OMADBNGIN_HOME="$tamper/home" "$tamper/dbctl" create redis 7 zt-unpinned "" off docker
+refute "and nothing was created" docker volume inspect omadbngin-zt-unpinned
+rm -rf "$tamper"
+
+# pinned_ref <engine> <version>: what dbctl must run for it
+pinned_ref() { jq -r --arg e "$1" --arg l "$2" '.docker[$e][$l] | "\(.image):\(.tag)@\(.digest)"' "$here/engines.lock"; }
+
 # ---- Per engine, per mode ------------------------------------------------------
 
 run_mode() {
@@ -196,7 +224,12 @@ run_mode() {
     check "state reports it as PostgreSQL, flavor postgis" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | \"\(.engine) \(.flavor)\"') == 'postgresql postgis' ]]"
     check "PostGIS is on in the postgres database" bash -c "'$(engine_bin postgresql psql)' '$url' -tAc 'select postgis_lib_version()' | grep -qx '3\.6\..*'"
     check "geometry works" bash -c "'$(engine_bin postgresql psql)' '$url' -tAc \"select ST_AsText(ST_Buffer(ST_MakePoint(0,0), 1, 1)) like 'POLYGON%'\" | grep -qx t"
-    check "it runs the postgis/postgis image" bash -c "[[ \$(docker inspect -f '{{.Config.Image}}' omadbngin-$n) == postgis/postgis:${LINE[postgis]} ]]"
+    check "it runs the postgis/postgis image" bash -c "[[ \$(docker inspect -f '{{.Config.Image}}' omadbngin-$n) == postgis/postgis:${LINE[postgis]}@sha256:* ]]"
+  fi
+  local image=""
+  if [[ $mode == docker ]]; then
+    image=$(docker inspect -f '{{.Config.Image}}' "omadbngin-$n")
+    check "it runs the image pinned by digest" bash -c "[[ '$image' == *@sha256:* && '$image' == '$(pinned_ref "$engine" "$version")' ]]"
   fi
 
   check "writes data" data write "$engine" "$port" "$user" "$PASS"
@@ -235,6 +268,7 @@ run_mode() {
     check "the data answers on the new port" eventually data read "$engine" "$np" "$user" "$PASS"
     check "the old port is closed" eventually bash -c "! ss -ltnH 'sport = :$port' | grep -q ."
     refute "set-port refuses a port below 1024" "$DBCTL" set-port "$n" 80
+    [[ $mode == docker ]] && check "set-port keeps the same pinned image" bash -c "[[ \$(docker inspect -f '{{.Config.Image}}' omadbngin-$n) == '$image' ]]"
     port=$np
   fi
 
@@ -342,7 +376,12 @@ if [[ $MODES != native ]] && docker info >/dev/null 2>&1 && git -C "$here" cat-f
   export REDISCLI_AUTH=$PASS
   eventually docker exec -e REDISCLI_AUTH omadbngin-zt-upgrade redis-cli --user app --no-auth-warning set omadb 42
   check "the old container has the password in its command line" bash -c "docker inspect -f '{{json .Config.Cmd}}' omadbngin-zt-upgrade | grep -qF -f '$pattern'"
+  old_image=$(docker inspect -f '{{.Config.Image}} {{.Image}}' omadbngin-zt-upgrade)
+  check "the old container names its image by tag only" bash -c "[[ '${old_image%% *}' == redis:7 ]]"
   check "a dbctl run upgrades it" env OMADBNGIN_HOME="$upgrade_home" "$DBCTL" state
+  check "it is made again from the very image it ran, now named by digest" bash -c "
+    read -r ref id < <(docker inspect -f '{{.Config.Image}} {{.Image}}' omadbngin-zt-upgrade)
+    [[ \$ref == redis:7@sha256:* && \$id == '${old_image#* }' ]]"
   refute "its command line no longer has the password" bash -c "docker inspect -f '{{json .Config.Cmd}}' omadbngin-zt-upgrade | grep -qF -f '$pattern'"
   check "the data is still there, behind the password" eventually bash -c "docker exec -e REDISCLI_AUTH omadbngin-zt-upgrade redis-cli --user app --no-auth-warning get omadb | grep -qx 42"
   check "it still refuses no password" bash -c "docker exec omadbngin-zt-upgrade redis-cli ping 2>&1 | grep -q NOAUTH"

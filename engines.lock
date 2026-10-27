@@ -1,6 +1,6 @@
 {
   "lockVersion": 1,
-  "generated": "2026-10-25",
+  "generated": "2026-10-27",
   "engines": {
     "postgresql": {
       "18": {
@@ -154,6 +154,132 @@
       "urls": [
         "https://archive.archlinux.org/packages/l/libxcrypt-compat/libxcrypt-compat-4.5.2-1-x86_64.pkg.tar.zst"
       ]
+    }
+  },
+  "docker": {
+    "postgresql": {
+      "18": {
+        "image": "postgres",
+        "tag": "18",
+        "digest": "sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6"
+      },
+      "17": {
+        "image": "postgres",
+        "tag": "17",
+        "digest": "sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe"
+      },
+      "16": {
+        "image": "postgres",
+        "tag": "16",
+        "digest": "sha256:9e2cf6287f25c3151f4c9421ccce2b17f3e60061c111a29165e0d2cdd9ff0a97"
+      },
+      "15": {
+        "image": "postgres",
+        "tag": "15",
+        "digest": "sha256:baa22e6286bf832cb147b8bb5aa9d8bc999846d69c21d11bf63f58fbeed1fa48"
+      },
+      "14": {
+        "image": "postgres",
+        "tag": "14",
+        "digest": "sha256:8ab94f61668dc73bbab4dc13273ff2fc37e635536af62aef5306a49a9682a446"
+      }
+    },
+    "postgis": {
+      "18-3.6": {
+        "image": "postgis/postgis",
+        "tag": "18-3.6",
+        "digest": "sha256:4a43e3c3e5d55b9208240fc71db543b79c638766280c625a425bd0a2390989c4"
+      },
+      "17-3.6": {
+        "image": "postgis/postgis",
+        "tag": "17-3.6",
+        "digest": "sha256:1ac10b2551ba84ae05db8e7da477afcd0a3fede99bcb7705da2ee157390cb095"
+      },
+      "16-3.6": {
+        "image": "postgis/postgis",
+        "tag": "16-3.6",
+        "digest": "sha256:d07ce3f06f657b6516c7511412232e97174d7e9dcf4c9fe520109b682b44a201"
+      },
+      "15-3.6": {
+        "image": "postgis/postgis",
+        "tag": "15-3.6",
+        "digest": "sha256:91098df530c92202d69193ded45dd47e6d0b6a3117a6398b0abe2be365f23550"
+      },
+      "14-3.6": {
+        "image": "postgis/postgis",
+        "tag": "14-3.6",
+        "digest": "sha256:fdf13349aac39b694214d1f323eab3b9ae9a624e2efb582a4c8d3debb1d0b817"
+      }
+    },
+    "mysql": {
+      "9.7": {
+        "image": "mysql",
+        "tag": "9.7",
+        "digest": "sha256:8fb11c38b3551e22d50adbb688f027f8ff4ea2d2445aa277c1cc97b4af85ec54"
+      },
+      "8.4": {
+        "image": "mysql",
+        "tag": "8.4",
+        "digest": "sha256:76f0358884cb92d9a086d24e5671c38048d3fef40f2588703d73eb55392d6b69"
+      },
+      "8.0": {
+        "image": "mysql",
+        "tag": "8.0",
+        "digest": "sha256:7dcddc01f13bab2f15cde676d44d01f61fc9f99fe7785e86196dfc07d358ae2b"
+      }
+    },
+    "mariadb": {
+      "11.8": {
+        "image": "mariadb",
+        "tag": "11.8",
+        "digest": "sha256:c4124d1afa875e47f2892edf26b482fa54f796e2f342d3717a04ca091a22a9bd"
+      },
+      "11.4": {
+        "image": "mariadb",
+        "tag": "11.4",
+        "digest": "sha256:d1891ede5a559f1086f55053bb8cc1569b0298338c4d72d71725a7f74f6ba620"
+      },
+      "10.11": {
+        "image": "mariadb",
+        "tag": "10.11",
+        "digest": "sha256:d769e37960821dfdcf096954f6e7ac89f747e116c1bba98e48edd265dfc7deae"
+      }
+    },
+    "redis": {
+      "8": {
+        "image": "redis",
+        "tag": "8",
+        "digest": "sha256:0a014ae5c04f55c82aaad2314de411c7a203de1c4312c3e526939226a0185dd9"
+      },
+      "7": {
+        "image": "redis",
+        "tag": "7",
+        "digest": "sha256:bd28fff4b665fdf1b73e8b5b73ec05d2f858f4fa3c8ea0d7c9bc09f7f6bf7039"
+      }
+    },
+    "valkey": {
+      "9": {
+        "image": "valkey/valkey",
+        "tag": "9",
+        "digest": "sha256:3add1a336a920ea54770a001ab6feb3da5fceea96a40373a3a2cd469b815f0b7"
+      },
+      "8": {
+        "image": "valkey/valkey",
+        "tag": "8",
+        "digest": "sha256:8f836008e0986c36adf50da714c7060cf689dbb335f61fe077939d90fa650809"
+      }
+    },
+    "mongodb": {
+      "8": {
+        "image": "mongo",
+        "tag": "8",
+        "digest": "sha256:e16e606f792ea89d2b4907b54e5e31eb86a7a23e27231dce3a982cc8f2d73cd2"
+      },
+      "7": {
+        "image": "mongo",
+        "tag": "7",
+        "digest": "sha256:8bb4442761a63a8dda452744082cdac9644b429807eb977b42324a63cef59ca4"
+      }
     }
   }
 }

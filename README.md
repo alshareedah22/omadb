@@ -56,11 +56,22 @@ Valkey's `.sha256` files; MySQL publishes no SHA-256, so those are hashed when t
 lock is made). OmaDBngin never downloads anything that isn't in the lock, and nothing is
 unpacked, built or run unless its checksum matches; a mismatch stops the install and
 leaves nothing behind. New versions arrive with plugin updates; maintainers
-regenerate the lock with `tools/update-engines-lock` and review the diff.
+regenerate the lock with `tools/update-engines-lock native` and review the diff.
 
 **Docker container** runs the official image as a container named `omadbngin-<name>`,
 labelled `omadbngin.managed=1`, with its data in the volume `omadbngin-<name>`.
 *Start with system* sets its restart policy to `unless-stopped`.
+
+**Images pinned by digest.** Docker servers don't run a bare tag such as `postgres:17`,
+which upstream can move at any time. The `docker` section of [`engines.lock`](engines.lock)
+pins every engine version to its repository, tag and the SHA-256 digest of the tag's
+multi-arch index, and dbctl runs `<repository>:<tag>@sha256:<digest>`, so Docker refuses
+anything that doesn't match. A version without a pin is refused, the same as a native build
+missing from the lock. Moving a server to another port or restoring a Redis/Valkey snapshot
+keeps the exact image the container was made with; containers made before 1.6.1 (tag only)
+keep the image they already run, now named by its digest. New image digests arrive with
+plugin updates; maintainers refresh them with `tools/update-engines-lock docker`
+(`native` for the native builds only, no argument for both) and review the diff.
 
 **PostGIS** is Docker only (the native PostgreSQL builds have no PostGIS). It runs the
 official [`postgis/postgis`](https://hub.docker.com/r/postgis/postgis) image, PostgreSQL
@@ -158,7 +169,8 @@ tests/test-migration.sh             # moving native and Docker servers over from
 Creates throwaway `zt-*` servers and checks, from the host over TCP: the right
 password works and wrong or missing ones are refused, data survives stop/start
 and restart, autostart, the URL, the CLI client and logs, port allocation,
-ordering, input validation, and that delete leaves nothing behind.
+ordering, input validation, that every native build and Docker image is pinned in
+`engines.lock` (and that an unpinned one is refused), and that delete leaves nothing behind.
 
 ## Remove
 
