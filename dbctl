@@ -47,9 +47,10 @@ fail() {
   exit 1
 }
 
-# engine|title|default port|version lines (first is the default)
+# engine|title|default port|version lines (first is the default)[|docker: Docker only]
 ENGINES=(
   "postgresql|PostgreSQL|5432|18 17 16 15 14"
+  "postgis|PostGIS|5432|18-3.6 17-3.6 16-3.6 15-3.6 14-3.6|docker"
   "mysql|MySQL|3306|9.7 8.4 8.0"
   "mariadb|MariaDB|3306|11.8 11.4 10.11"
   "redis|Redis|6379|8 7"
@@ -60,18 +61,23 @@ ENGINES=(
 engine_field() {
   local e
   for e in "${ENGINES[@]}"; do
-    IFS='|' read -r id title port versions <<<"$e"
+    IFS='|' read -r id title port versions only <<<"$e"
     if [[ $id == "$1" ]]; then
       case $2 in
       title) echo "$title" ;;
       port) echo "$port" ;;
       versions) echo "$versions" ;;
+      only) echo "$only" ;;
       esac
       return 0
     fi
   done
   fail "unknown engine: $1"
 }
+
+# PostGIS is PostgreSQL with the PostGIS extension (the postgis/postgis images): clients,
+# URLs, backups and restores are PostgreSQL's.
+kind_of() { if [[ $1 == postgis ]]; then echo postgresql; else echo "$1"; fi; }
 
 container() { echo "$PREFIX$1"; }
 unit() { echo "$PREFIX$1.service"; }
@@ -126,7 +132,7 @@ next_port() {
 
 default_user() {
   case $1 in
-  postgresql) echo postgres ;;
+  postgresql | postgis) echo postgres ;;
   mysql | mariadb) echo root ;;
   redis | valkey) echo default ;;
   mongodb) echo "" ;;
@@ -511,12 +517,15 @@ create_docker() {
   [[ $(docker_status) == running ]] || fail "Docker is not running"
   local image inner data env=() cmd=()
   case $engine in
-  postgresql)
+  postgresql | postgis)
     image="postgres:$version"
+    # postgis/postgis:<major>-<postgis> is the official postgres image plus PostGIS. It turns the
+    # extension on in POSTGRES_DB (which defaults to the user's name), so that is postgres here.
+    [[ $engine == postgis ]] && { image="postgis/postgis:$version"; env=(-e POSTGRES_DB=postgres); }
     inner=5432
     # Postgres 18 images moved PGDATA under /var/lib/postgresql/<major>.
-    if ((${version%%.*} >= 18)); then data=/var/lib/postgresql; else data=/var/lib/postgresql/data; fi
-    env=(-e "POSTGRES_USER=$user")
+    if ((${version%%[.-]*} >= 18)); then data=/var/lib/postgresql; else data=/var/lib/postgresql/data; fi
+    env+=(-e "POSTGRES_USER=$user")
     if [[ -n $pass ]]; then env+=(-e "POSTGRES_PASSWORD=$pass"); else env+=(-e POSTGRES_HOST_AUTH_METHOD=trust); fi
     # (env goes to docker in a private --env-file, not on its command line: see docker_run)
     ;;
@@ -712,7 +721,7 @@ cmd_state() {
   status=$(docker_status)
 
   engines=$(printf '%s\n' "${ENGINES[@]}" | jq -Rsc 'split("\n") | map(select(. != "") | split("|")
-    | {id: .[0], title: .[1], port: (.[2] | tonumber), versions: (.[3] | split(" "))})')
+    | {id: .[0], title: .[1], port: (.[2] | tonumber), versions: (.[3] | split(" ")), dockerOnly: (.[4] == "docker")})')
 
   if [[ -d $ENGINES_DIR && -f $LOCK ]]; then
     # Only the pinned builds count: an older download of a line is not what a new server gets.
@@ -799,7 +808,9 @@ cmd_state() {
     --argjson omatable "$([[ -d $HOME/.config/omarchy/plugins/blackcode.omatableplus ]] && echo true || echo false)" \
     '.[0] as $a | .[1] as $b | def user0: {postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default"}[.engine] // "";
      {docker: $docker, engines: $engines, installed: $installed, omatable: $omatable,
-      services: ($a + $b | map(.user = (.user // (. | user0)) | .password = (.password // ""))
+      # PostGIS servers are PostgreSQL to every client (OmaTablePlus too); flavor names the image.
+      services: ($a + $b | map(if .engine == "postgis" then .flavor = "postgis" | .engine = "postgresql" else . end)
+        | map(.user = (.user // (. | user0)) | .password = (.password // ""))
         | sort_by(.created | sub("\\.[0-9]+"; "") | sub("Z$"; "+00:00")
             | capture("^(?<t>.{19})(?<s>[+-])(?<h>..):(?<m>..)$")
             | (.t + "Z" | fromdateiso8601) - ((if .s == "+" then 1 else -1 end) * ((.h | tonumber) * 3600 + (.m | tonumber) * 60))))}'
@@ -812,6 +823,7 @@ cmd_create() {
   [[ $name =~ ^[a-z0-9][a-z0-9-]{0,40}$ ]] || fail "name: lowercase letters, digits and dashes"
   [[ " $(engine_field "$engine" versions) " == *" $version "* ]] || fail "unsupported $engine version: $version"
   [[ $mode == native || $mode == docker ]] || fail "mode must be native or docker"
+  [[ $mode == native && $(engine_field "$engine" only) == docker ]] && fail "$(engine_field "$engine" title) runs in Docker only"
   [[ -z $user && -n $pass && $engine == mongodb ]] && user=admin
   [[ -z $user ]] && user=$(default_user "$engine")
   [[ -z $user || $user =~ ^[A-Za-z_][A-Za-z0-9_.-]{0,31}$ ]] || fail "username: letters, digits, _ . - (up to 32)"
@@ -887,7 +899,7 @@ creds_of() {
 cmd_url() {
   require_managed "${1:-}"
   local engine port auth=""
-  engine=$(field_of "$1" engine)
+  engine=$(kind_of "$(field_of "$1" engine)")
   port=$(field_of "$1" port)
   creds_of "$1"
   if [[ -n $USER_ ]]; then
@@ -911,7 +923,7 @@ cmd_url() {
 cmd_client() {
   require_managed "${1:-}"
   local engine port url
-  engine=$(field_of "$1" engine)
+  engine=$(kind_of "$(field_of "$1" engine)")
   port=$(field_of "$1" port)
   creds_of "$1"
   url=$(cmd_url "$1")
@@ -978,7 +990,7 @@ engine_base() { echo "$ENGINES_DIR/$(field_of "$1" engine)/$(field_of "$1" exact
 cmd_backup() {
   local name=${1:-} file=${2:-} engine port base c tmp ext
   require_managed "$name"
-  engine=$(field_of "$name" engine)
+  engine=$(kind_of "$(field_of "$name" engine)")
   port=$(field_of "$name" port)
   creds_of "$name"
   [[ $engine == mongodb ]] && fail "MongoDB backups: open the server in OmaTablePlus and use Database ▾ → Back up"
@@ -1021,7 +1033,7 @@ cmd_restore() {
   local name=${1:-} file=${2:-} engine port base c dir
   require_managed "$name"
   [[ -f $file ]] || fail "no file at $file"
-  engine=$(field_of "$name" engine)
+  engine=$(kind_of "$(field_of "$name" engine)")
   port=$(field_of "$name" port)
   creds_of "$name"
   c=$(container "$name")
@@ -1193,6 +1205,7 @@ set-port) shift; cmd_set_port "$@" ;;
 port) next_port "${2:-}" ;;
 install)
   [[ " $(engine_field "${2:-}" versions) " == *" ${3:-} "* ]] || fail "usage: install <engine> <version>"
+  [[ $(engine_field "$2" only) == docker ]] && fail "$(engine_field "$2" title) runs in Docker only"
   ensure_engine "$2" "$3"
   ;;
 *) sed -n '3,32p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;

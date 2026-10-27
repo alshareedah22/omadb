@@ -170,14 +170,14 @@ Panel {
   }
   readonly property var newEngineInfo: engineInfo(newEngine)
   readonly property string defaultName: {
-    const base = newEngine + "-" + String(newVersion || "").split(".")[0]
+    const base = newEngine + "-" + String(newVersion || "").split(/[.-]/)[0]
     const taken = {}
     services.forEach(function(s) { taken[s.name] = true })
     if (!taken[base]) return base
     for (let i = 2; ; i++) if (!taken[base + "-" + i]) return base + "-" + i
   }
 
-  readonly property string defaultUser: ({ postgresql: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default" })[newEngine] || ""
+  readonly property string defaultUser: ({ postgresql: "postgres", postgis: "postgres", mysql: "root", mariadb: "root", redis: "default", valkey: "default" })[newEngine] || ""
 
   function pickEngine(id) {
     root.newEngine = id
@@ -538,7 +538,7 @@ Panel {
                 width: parent.width
                 elide: Text.ElideRight
                 text: row.armed ? "Click 󰆴 again to delete it and its data" : (row.modelData.mode === "docker" ? "󰡨 " : "󰆼 ")
-                  + root.engineInfo(row.modelData.engine).title + " " + (row.modelData.exact || row.modelData.version)
+                  + root.engineInfo(row.modelData.flavor || row.modelData.engine).title + " " + (row.modelData.exact || row.modelData.version)
                   + "  ·  :" + row.modelData.port
                 color: row.armed ? Color.urgent : root.dim
                 font.family: root.fontFamily
@@ -751,7 +751,11 @@ Panel {
             required property var modelData
             label: modelData.label
             selected: root.newMode === modelData.value
-            onPicked: root.newMode = modelData.value
+            onPicked: {
+              root.newMode = modelData.value
+              // Docker-only engines (PostGIS) are not offered natively.
+              if (modelData.value === "native" && root.newEngineInfo.dockerOnly) root.pickEngine("postgresql")
+            }
           }
         }
       }
@@ -761,7 +765,7 @@ Panel {
         width: parent.width
         spacing: Style.space(6)
         Repeater {
-          model: root.engines
+          model: root.engines.filter(function(e) { return root.newMode === "docker" || !e.dockerOnly })
           Chip {
             required property var modelData
             label: modelData.title

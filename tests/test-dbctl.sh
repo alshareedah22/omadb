@@ -17,8 +17,8 @@ PASS='p@ss#9!'
 MODES=${1:-all}
 shift || true
 ENGINES=("$@")
-((${#ENGINES[@]})) || ENGINES=(postgresql mysql mariadb redis valkey mongodb)
-declare -A LINE=([postgresql]=17 [mysql]=8.4 [mariadb]=11.8 [redis]=7 [valkey]=9 [mongodb]=8)
+((${#ENGINES[@]})) || ENGINES=(postgresql postgis mysql mariadb redis valkey mongodb)
+declare -A LINE=([postgresql]=17 [postgis]=18-3.6 [mysql]=8.4 [mariadb]=11.8 [redis]=7 [valkey]=9 [mongodb]=8)
 
 passed=0
 failed=0
@@ -58,7 +58,7 @@ with_compat() {
 
 # connect <engine> <port> <user> <pass>: authenticate over TCP and run a query
 connect() {
-  local engine=$1 port=$2 user=$3 pass=$4
+  local engine=${1/postgis/postgresql} port=$2 user=$3 pass=$4
   case $engine in
   postgresql) PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -tAc 'select 1' | grep -qx 1 ;;
   mysql | mariadb)
@@ -80,7 +80,7 @@ connect() {
 
 # write / read a marker value through the engine
 data() {
-  local op=$1 engine=$2 port=$3 user=$4 pass=$5
+  local op=$1 engine=${2/postgis/postgresql} port=$3 user=$4 pass=$5
   case $engine in
   postgresql)
     local sql="select x from omadb_t"
@@ -110,7 +110,7 @@ data() {
 
 # drop the marker value written by `data write`
 forget() {
-  local engine=$1 port=$2 user=$3 pass=$4
+  local engine=${1/postgis/postgresql} port=$2 user=$3 pass=$4
   case $engine in
   postgresql) PGPASSWORD="$pass" "$(engine_bin postgresql psql)" -h 127.0.0.1 -p "$port" -U "$user" -d postgres -w -qc 'drop table omadb_t' ;;
   mysql | mariadb) MYSQL_PWD=$pass with_compat "$(engine_bin "$engine" "$engine")" -h127.0.0.1 -P"$port" -u"$user" -e 'drop database omadb' 2>/dev/null ;;
@@ -137,7 +137,11 @@ refute "rejects a password with \$" "$DBCTL" create redis 7 zt-x "" off native a
 refute "rejects a password with a space" "$DBCTL" create redis 7 zt-x "" off native app 'a b'
 refute "rejects a MongoDB user without password" "$DBCTL" create mongodb 8 zt-x "" off native app ""
 refute "rejects actions on unknown servers" "$DBCTL" stop zt-nope
-check "state is valid JSON" bash -c "'$DBCTL' state | jq -e '.engines | length == 6'"
+refute "PostGIS is refused natively" "$DBCTL" create postgis 18-3.6 zt-x "" off native
+refute "PostGIS has no native download" "$DBCTL" install postgis 18-3.6
+refute "rejects a PostGIS version it does not offer" "$DBCTL" create postgis 13-3.5 zt-x
+check "state is valid JSON" bash -c "'$DBCTL' state | jq -e '.engines | length == 7'"
+check "state marks PostGIS as Docker only" bash -c "'$DBCTL' state | jq -e '[.engines[] | select(.dockerOnly) | .id] == [\"postgis\"]'"
 refute "nothing was created by bad input" bash -c "'$DBCTL' state | jq -e '.services[] | select(.name == \"zt-x\")'"
 
 # ---- Pinned downloads -----------------------------------------------------------
@@ -187,7 +191,13 @@ run_mode() {
   local url
   url=$("$DBCTL" url "$n")
   check "URL carries the encoded credentials" grep -q "app:p%40ss%239%21@127.0.0.1:$port" <<<"$url"
-  [[ $engine == postgresql ]] && check "URL connects" "$(engine_bin postgresql psql)" "$url" -tAc 'select 1'
+  [[ $engine == postgresql || $engine == postgis ]] && check "URL connects" "$(engine_bin postgresql psql)" "$url" -tAc 'select 1'
+  if [[ $engine == postgis ]]; then
+    check "state reports it as PostgreSQL, flavor postgis" bash -c "[[ \$('$DBCTL' state | jq -r --arg n $n '.services[] | select(.name == \$n) | \"\(.engine) \(.flavor)\"') == 'postgresql postgis' ]]"
+    check "PostGIS is on in the postgres database" bash -c "'$(engine_bin postgresql psql)' '$url' -tAc 'select postgis_lib_version()' | grep -qx '3\.6\..*'"
+    check "geometry works" bash -c "'$(engine_bin postgresql psql)' '$url' -tAc \"select ST_AsText(ST_Buffer(ST_MakePoint(0,0), 1, 1)) like 'POLYGON%'\" | grep -qx t"
+    check "it runs the postgis/postgis image" bash -c "[[ \$(docker inspect -f '{{.Config.Image}}' omadbngin-$n) == postgis/postgis:${LINE[postgis]} ]]"
+  fi
 
   check "writes data" data write "$engine" "$port" "$user" "$PASS"
   check "stop" "$DBCTL" stop "$n"
@@ -240,7 +250,7 @@ run_mode() {
   refute "the terminal's command line has no password" grep -qF -- "$PASS" "$SHIM/launched-argv"
   check "the client launcher is private" bash -c "[[ \$(stat -c %a '$launcher') == 600 && \$(stat -c %a '$(dirname "$launcher")') == 700 ]]"
   case $engine in
-  postgresql) check "client logs in" bash -c "$cmd -tAc 'select current_user' | grep -qx $user" ;;
+  postgresql | postgis) check "client logs in" bash -c "$cmd -tAc 'select current_user' | grep -qx $user" ;;
   mysql | mariadb) check "client logs in" bash -c "$cmd -NBe 'select current_user()' 2>/dev/null | grep -q '^$user@'" ;;
   redis | valkey) check "client logs in" bash -c "$cmd ping | grep -qx PONG" ;;
   mongodb) check "client logs in" bash -c "$cmd --eval 'db.runCommand({connectionStatus: 1}).authInfo.authenticatedUsers[0].user' </dev/null | grep -qx $user" ;;
@@ -300,6 +310,7 @@ sampler=$!
 for engine in "${ENGINES[@]}"; do
   for mode in native docker; do
     [[ $MODES == all || $MODES == "$mode" ]] || continue
+    [[ $mode == native && $engine == postgis ]] && continue # Docker only
     if [[ $mode == docker ]] && ! docker info >/dev/null 2>&1; then
       echo "  (skipping docker: not running)"
       continue

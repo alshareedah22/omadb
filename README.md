@@ -5,7 +5,7 @@
 A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 
 - **Create** a server: choose how it runs (**native engine** or **Docker
-  container**), an engine (PostgreSQL, MySQL, MariaDB, Redis, Valkey, MongoDB),
+  container**), an engine (PostgreSQL, PostGIS, MySQL, MariaDB, Redis, Valkey, MongoDB),
   a version, a name, a port, and the **username and password** to use. A free port is suggested
   automatically, so several versions of the same engine run side by side.
 - **Start / stop** it with the switch
@@ -62,6 +62,12 @@ regenerate the lock with `tools/update-engines-lock` and review the diff.
 labelled `omadbngin.managed=1`, with its data in the volume `omadbngin-<name>`.
 *Start with system* sets its restart policy to `unless-stopped`.
 
+**PostGIS** is Docker only (the native PostgreSQL builds have no PostGIS). It runs the
+official [`postgis/postgis`](https://hub.docker.com/r/postgis/postgis) image, PostgreSQL
+18, 17, 16, 15 or 14 with PostGIS 3.6 (versions `18-3.6` … `14-3.6`), with the extension
+already on in the `postgres` database. Everything else treats it as PostgreSQL: the
+connection URL, the `psql` client, backups and restores, and OmaTablePlus.
+
 Either way, servers listen on `127.0.0.1` only, stop and start keep the data,
 and only Delete removes it. Servers OmaDBngin did not create are never touched.
 
@@ -71,7 +77,7 @@ Leave them empty for the usual passwordless development defaults, or set your ow
 
 | Engine          | Default user         | What a username / password does |
 |-----------------|----------------------|---------------------------------|
-| PostgreSQL      | `postgres`           | That user is the superuser; a password turns on `scram-sha-256` auth |
+| PostgreSQL / PostGIS | `postgres`      | That user is the superuser; a password turns on `scram-sha-256` auth |
 | MySQL / MariaDB | `root`               | Another name creates that user with all privileges; a password is also set on `root` |
 | Redis / Valkey  | `default`            | A password sets `requirepass`; another name creates an ACL user with full access and turns `default` off |
 | MongoDB         | none (no auth)       | Creates a `root` user in `admin` and turns on auth; needs a password |
