@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "blackcode.omadbngin",
   "name": "OmaDBngin",
-  "version": "1.6.1",
+  "version": "1.7.0",
   "author": "BlackCode",
   "license": "MIT",
   "description": "OmaDBngin: DBngin-style local database servers for the Omarchy bar. PostgreSQL, PostGIS, MySQL, MariaDB, Redis, Valkey and MongoDB in any version, on any port, as the native engine or in Docker, started and stopped with a click",
@@ -14,25 +14,55 @@
   },
   "barWidget": {
     "displayName": "OmaDBngin",
-    "description": "Local database servers; click to create, start, stop, connect or remove them",
+    "description": "Local database servers; click to create, start, stop, connect or remove them. Right-click for settings",
     "category": "Development",
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "label": "Icon and count",
-      "defaultMode": "Native"
+      "countStyle": "Badge",
+      "crashDot": true,
+      "rowStyle": "Detailed",
+      "stats": true,
+      "defaultMode": "Native",
+      "backupDir": ""
     },
     "schema": [
       {
-        "key": "label",
+        "key": "countStyle",
         "type": "enum",
-        "label": "Bar label",
+        "label": "Running count",
         "options": [
-          "Icon and count",
-          "Icon only"
+          "Badge",
+          "Text",
+          "Hidden"
         ],
-        "defaultValue": "Icon and count",
-        "description": "Show how many servers are running next to the icon."
+        "defaultValue": "Badge",
+        "description": "How the bar icon shows the number of running servers. Replaces 1.6's label setting (Icon only = Hidden)."
+      },
+      {
+        "key": "crashDot",
+        "type": "boolean",
+        "label": "Crash dot",
+        "defaultValue": true,
+        "description": "A red dot on the bar icon when a server stops on its own, until the panel is opened."
+      },
+      {
+        "key": "rowStyle",
+        "type": "enum",
+        "label": "Rows",
+        "options": [
+          "Detailed",
+          "Compact"
+        ],
+        "defaultValue": "Detailed",
+        "description": "Detailed rows show uptime, CPU, memory and data size; compact rows show one status line."
+      },
+      {
+        "key": "stats",
+        "type": "boolean",
+        "label": "Stats while open",
+        "defaultValue": true,
+        "description": "Read CPU, memory and readiness while the panel is open. Off: no stats work at all."
       },
       {
         "key": "defaultMode",
@@ -44,6 +74,13 @@
         ],
         "defaultValue": "Native",
         "description": "Native downloads and runs the engine itself, like DBngin. Docker runs it in a container."
+      },
+      {
+        "key": "backupDir",
+        "type": "string",
+        "label": "Backup folder",
+        "defaultValue": "",
+        "description": "Where backups are written and listed. Empty: ~/Downloads."
       }
     ]
   }

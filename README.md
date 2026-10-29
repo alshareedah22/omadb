@@ -2,6 +2,29 @@
 
 ![OmaDBngin: local database servers, one click away in the Omarchy bar](preview.png)
 
+## What's new in 1.7.0
+
+- **Bar icon status**: the running count as a badge (or text, or hidden), a red dot when a
+  server stops on its own (cleared when you open the panel), and a tooltip listing every server.
+- **Richer rows**: uptime, CPU %, memory and data size, and **ready** once a server accepts
+  connections (not just when its process runs).
+- **Search** when you have more than five servers.
+- **Stacks**: group servers per project (e.g. `shop` = Postgres + Redis) and start or stop the
+  whole stack at once.
+- **Start all / Stop all** in the panel header (only the servers shown when you search).
+- **Copy as**: URL, `DATABASE_URL` / `REDIS_URL` / `MONGODB_URI`, Laravel `.env`, Django,
+  JDBC or the CLI command.
+- **Logs in the panel**, live, besides the terminal view.
+- **Settings page** (the gear, or right-click the bar icon): position on the bar (left, center
+  or right; first, last, or before/after any widget), the bar icon, compact or detailed rows,
+  stats on/off, default mode, default port and user per engine, backup folder, the SUPER+ALT+D
+  shortcut and reset to defaults.
+- **Zero configuration**: install with `--enable` and it is ready, shortcut included.
+- **Light on the machine**: with the panel closed it only listens for start/stop events plus
+  one check a minute. CPU, memory and readiness are read from kernel counters, only while
+  the panel is open, never with `docker stats`. Measured on the author's machine with one
+  server running, the shell used 0.85 % of a core with the panel open (1.6.1: 1.73 %).
+
 A DBngin-style database manager for the Omarchy bar. Click the 󰆼 icon to:
 
 - **Create** a server: choose how it runs (**native engine** or **Docker
@@ -25,7 +48,27 @@ last error from its log. The  button opens its tools:
 - **Move to port**: the server gets a new port and restarts if it was running (Docker
   servers are recreated on the same volume, so the data stays).
 
-The bar shows how many servers are running; hover for the list.
+The bar shows how many servers are running; hover for the list. Right-click opens the settings.
+
+## Settings
+
+The gear in the panel (or right-click on the bar icon, or
+`qs -p /usr/share/omarchy/shell ipc call omadbngin settings`) opens the settings page.
+Changes save at once into this widget's entry in `~/.config/omarchy/shell.json`; before each
+save the file is copied to `shell.json.omadbngin-settings-backup`.
+
+| Setting | What it does |
+|---|---|
+| Position on the bar | Left, center or right; first, last, or before / after a widget in that section |
+| Running count | Badge on the icon, text next to it, or hidden (1.6's `label: "Icon only"` = hidden) |
+| Red dot | Shown when a server stops on its own (failed, non-zero exit, out of memory) |
+| Rows | Detailed (uptime, CPU, memory, data size) or compact (one status line) |
+| Stats while open | Off: no CPU, memory or readiness work at all |
+| New servers run as | Native engine or Docker container |
+| Defaults for new servers | Port and username per engine; empty uses the engine's own default |
+| Backup folder | Where backups are written and listed (default `~/Downloads`) |
+| Shortcut | Adds or removes SUPER+ALT+D (opens the panel) in `~/.config/hypr/bindings.lua` |
+| Reset to defaults | Removes every setting from the entry (click twice) |
 
 ## Native or Docker
 
@@ -128,19 +171,41 @@ This plugin used to be called OmaDB (`blackcode.omadb`). Install OmaDBngin, remo
 
 ## Install
 
-From git:
-
 ```bash
 omarchy plugin add https://github.com/alshareedah22/omadbngin.git --enable
 ```
+
+That is all: nothing to configure. The icon appears on the right of the bar, and on its first
+start the plugin sets itself up:
+
+- **SUPER+ALT+D** opens the panel, added to `~/.config/hypr/bindings.lua` only if that key is
+  free (`dbctl unbind` removes it, and it is never added again).
+- New servers run as the **native engine**: no Docker, no root, no packages. The first server
+  of a version downloads that build once. Docker mode is there when Docker is installed.
+
+Everything else has a working default you can change on the settings page (the gear, or
+right-click the icon).
 
 Or from a local copy:
 
 ```bash
 mkdir -p ~/.config/omarchy/plugins/blackcode.omadbngin
-cp manifest.json Panel.qml DbState.qml qmldir dbctl engines.lock icon.svg LICENSE ~/.config/omarchy/plugins/blackcode.omadbngin/
+cp manifest.json Panel.qml DbState.qml Layout.js qmldir dbctl engines.lock icon.svg LICENSE ~/.config/omarchy/plugins/blackcode.omadbngin/
 omarchy plugin enable blackcode.omadbngin --section right
 ```
+
+## Updating
+
+Already using OmaDBngin? Update in place; your servers, their data and settings are kept.
+
+```bash
+omarchy plugin update blackcode.omadbngin
+omarchy restart shell
+```
+
+`omarchy plugin update` shows the changes and asks first (`--yes` skips the question). Coming
+from 1.6, nothing else is needed: a 1.6 `label: "Icon only"` setting carries over as a hidden
+count, and the first start of 1.7 adds the SUPER+ALT+D shortcut when that key is free.
 
 ## Command line
 
@@ -156,7 +221,16 @@ dbctl restore app-db ~/Downloads/app-db-20261026-101500.sql
 dbctl backups app-db                         # JSON list of its backups, newest first
 dbctl set-port app-db 5440
 dbctl remove app-db [--keep-data]
+dbctl copy app-db laravel                    # url env laravel django jdbc cli (conn prints it)
+dbctl stack add shop app-db                  # stacks: list, add, remove, delete, start, stop
+dbctl stack start shop
+dbctl state --full                           # adds CPU time, memory and readiness per server
+dbctl sizes                                  # data size per server (cached 5 min)
+dbctl bind | unbind                          # SUPER+ALT+D opens the panel
 ```
+
+Backups go to `OMADBNGIN_BACKUP_DIR` when it is set (the panel sets it from the backup
+folder setting), otherwise `~/Downloads`.
 
 ## Tests
 
@@ -164,6 +238,9 @@ dbctl remove app-db [--keep-data]
 tests/test-dbctl.sh                 # every engine, native and Docker (~15 min)
 tests/test-dbctl.sh native redis    # one mode, chosen engines
 tests/test-migration.sh             # moving native and Docker servers over from OmaDB
+tests/test-fast.sh                  # connection formats, stacks, state, shortcut (seconds, no Docker)
+node --test tests/js/               # bar position and settings writes
+tools/measure-load 60               # the shell's CPU and memory, panel closed or open
 ```
 
 Creates throwaway `zt-*` servers and checks, from the host over TCP: the right
@@ -181,6 +258,7 @@ first, while `dbctl` is still installed (in the panel, or for all of them at onc
 ```bash
 D=~/.config/omarchy/plugins/blackcode.omadbngin/dbctl
 for s in $("$D" state | jq -r '.services[].name'); do "$D" remove "$s"; done
+"$D" unbind                                  # the SUPER+ALT+D line, if you added it
 omarchy plugin remove blackcode.omadbngin
 ```
 
@@ -188,7 +266,8 @@ Then, if you want the disk space back (this deletes all server data and backups 
 "keep data"):
 
 ```bash
-rm -rf ~/.local/share/omadbngin          # downloaded engines, servers, *.removed-<date> folders
+rm -rf ~/.local/share/omadbngin          # downloaded engines, servers, stacks, *.removed-<date> folders
+rm -f ~/.config/omarchy/shell.json.omadbngin-settings-backup
 docker ps -a --filter label=omadbngin.managed=1   # should be empty
 docker volume ls --filter name=omadbngin-          # remove any left with: docker volume rm <name>
 docker volume ls --filter name=omadb-              # volumes kept from the 1.x migration

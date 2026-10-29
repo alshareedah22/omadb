@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Measures what OmaDBngin costs: the Omarchy shell's CPU and memory over a window, plus the
+# processes the widget keeps running (event watchers, dbctl runs, log followers).
+#
+#   tools/measure-load [seconds]     default 60
+#
+# Run it with the panel closed, then again with it open (qs -p /usr/share/omarchy/shell ipc
+# call blackcode.omadbngin open), and compare with the budget in the 1.7 spec.
+
+set -euo pipefail
+
+secs=${1:-60}
+pid=$(pgrep -f 'quickshell -n -p /usr/share/omarchy/shell' | head -1)
+[[ -n $pid ]] || { echo "omarchy-shell is not running" >&2; exit 1; }
+hz=$(getconf CLK_TCK)
+
+ticks() { awk '{ print $14 + $15 + $16 + $17 }' "/proc/$1/stat"; }
+rss() { awk '/^VmRSS/ { print $2 }' "/proc/$1/status"; }
+kids() { pgrep -P "$pid" -a 2>/dev/null | grep -E 'dbctl|omadbngin|docker/events|docker events|journalctl --user -f' || true; }
+
+t0=$(ticks "$pid")
+r0=$(rss "$pid")
+runs=0
+end=$((SECONDS + secs))
+while ((SECONDS < end)); do
+  runs=$((runs + $(pgrep -P "$pid" -fc '/dbctl state' || true)))
+  read -r -t 1 <> <(:) || true
+done
+t1=$(ticks "$pid")
+r1=$(rss "$pid")
+
+awk -v a="$t0" -v b="$t1" -v hz="$hz" -v s="$secs" 'BEGIN { printf "shell CPU      %.2f %% of one core over %d s\n", (b - a) / hz / s * 100, s }'
+echo "shell RSS      $((r0 / 1024)) MB -> $((r1 / 1024)) MB ($(((r1 - r0))) KB)"
+echo "dbctl state    seen running in $runs of $secs one-second samples"
+echo "kept processes:"
+kids | sed 's/^/  /'
